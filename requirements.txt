@@ -1,0 +1,6 @@
+# ComfyUI MickMumpitz Nodes dependencies
+# Note: torch, numpy, and Pillow are already provided by ComfyUI
+
+# Optional: OpenCV for advanced tint adjustments (LAB color space)
+# Uncomment if you need tint adjustment functionality
+# opencv-python
