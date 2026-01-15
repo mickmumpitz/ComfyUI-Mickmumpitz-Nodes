@@ -11,13 +11,16 @@ import sys
 def install():
     """
     Install any additional dependencies required by the nodes.
-    Basic dependencies (torch, numpy, Pillow) are usually already available in ComfyUI.
     """
-    print("Installing ComfyUI MickMumpitz Nodes...")
+    print("Installing ComfyUI MickMumpitz Nodes dependencies...")
 
-    # All required packages (torch, numpy, Pillow) are typically already installed with ComfyUI
-    # If you need additional packages in the future, install them here:
-    # subprocess.check_call([sys.executable, "-m", "pip", "install", "package-name"])
+    # Install opencv-python for advanced color correction features
+    try:
+        import cv2
+        print("opencv-python already installed")
+    except ImportError:
+        print("Installing opencv-python...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python>=4.5.0"])
 
     print("ComfyUI MickMumpitz Nodes installed successfully!")
     return True

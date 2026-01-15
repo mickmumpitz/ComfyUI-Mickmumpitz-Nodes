@@ -1,24 +1,19 @@
 [project]
-name = "Mickmumpitz-Nodes"
-description = "A collection of custom nodes for ComfyUI by MickMumpitz"
+name = "comfyui-mickmumpitz-nodes"
+description = "A collection of custom nodes for ComfyUI by Mickmumpitz"
 version = "1.0.0"
-license = { text = "MIT" }
-
-authors = [
-    { name = "MickMumpitz" }
-]
-
-requires-python = ">=3.8"
+license = { file = "LICENSE" }
 
 dependencies = [
-    "torch",
     "numpy",
     "Pillow",
+    "opencv-python",
 ]
 
 [project.urls]
-Repository = "https://github.com/yourusername/comfyui-mickmumpitz-nodes"
+Repository = "https://github.com/mickmumpitz/ComfyUI-Mickmumpitz-Nodes"
 
-[build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.comfy]
+PublisherId = "mickmumpitz"
+DisplayName = "Mickmumpitz Nodes"
+Icon = ""
