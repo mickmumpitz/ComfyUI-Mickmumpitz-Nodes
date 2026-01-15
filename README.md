@@ -1,4 +1,4 @@
-# ComfyUI MickMumpitz Nodes
+# ComfyUI Mickmumpitz Nodes
 
 A collection of custom nodes for ComfyUI by Mickmumpitz.
 
@@ -17,7 +17,7 @@ Clone this repository into your ComfyUI custom nodes directory:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/MickMumpitz/ComfyUI-Mickmumpitz-Nodes.git
+git clone https://github.com/mickmumpitz/ComfyUI-Mickmumpitz-Nodes.git
 ```
 
 ## License
