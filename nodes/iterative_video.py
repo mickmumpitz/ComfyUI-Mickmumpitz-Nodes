@@ -50,7 +50,7 @@ def save_iteration_frames(frames: torch.Tensor, session_id: int, iteration: int)
 
 
 class IterVideoRouter:
-    """Routes between initial start image (iteration 0) and saved last frame (iteration > 0)."""
+    """Routes between initial start image (iteration 0) and last N frames from the buffer (iteration > 0)."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -58,14 +58,16 @@ class IterVideoRouter:
             "required": {
                 "start_image": ("IMAGE",),
                 "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
+                "session_id": ("INT", {"default": 1, "min": 1, "max": 99999}),
             },
             "optional": {
+                "num_start_frames": ("INT", {"default": 1, "min": 1, "max": 99}),
                 "previous_frame_path": ("STRING", {"default": "", "multiline": False}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("current_start",)
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("current_start", "num_start_frames")
     FUNCTION = "route"
     CATEGORY = "Mickmumpitz/video/iteration"
 
@@ -73,14 +75,22 @@ class IterVideoRouter:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def route(self, start_image, iteration, previous_frame_path=""):
-        if iteration == 0 or not previous_frame_path or not os.path.isfile(previous_frame_path):
-            return (start_image,)
+    def route(self, start_image, iteration, session_id, num_start_frames=1, previous_frame_path=""):
+        if iteration == 0:
+            return (start_image, num_start_frames)
 
-        loaded = load_image_as_tensor(previous_frame_path)
-        # Match device of start_image
-        loaded = loaded.to(start_image.device)
-        return (loaded,)
+        # Pull last N frames from the in-memory buffer
+        if session_id in FRAME_BUFFERS:
+            buffer = FRAME_BUFFERS[session_id]
+            start_frames = buffer[-num_start_frames:]
+            return (start_frames.to(start_image.device), num_start_frames)
+
+        # Fallback: load single frame from disk
+        if previous_frame_path and os.path.isfile(previous_frame_path):
+            loaded = load_image_as_tensor(previous_frame_path)
+            return (loaded.to(start_image.device), num_start_frames)
+
+        return (start_image, num_start_frames)
 
 
 class ControlImageSlicer:
@@ -172,7 +182,7 @@ class FrameAccumulator:
                 "session_id": ("INT", {"default": 1, "min": 1, "max": 99999}),
             },
             "optional": {
-                "trim_first_n": ("INT", {"default": 0, "min": 0, "max": 999}),
+                "num_start_frames": ("INT", {"default": 0, "min": 0, "max": 99}),
                 "save_intermediate": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
@@ -193,11 +203,11 @@ class FrameAccumulator:
         return float("NaN")
 
     def accumulate(self, new_frames, iteration, total_iterations, session_id,
-                   trim_first_n=0, save_intermediate=False,
+                   num_start_frames=0, save_intermediate=False,
                    unique_id=None, prompt=None, extra_pnginfo=None):
-        # Trim overlap frames if specified
-        if trim_first_n > 0 and iteration > 0:
-            new_frames = new_frames[trim_first_n:]
+        # Trim start frames that overlap with the previous iteration
+        if num_start_frames > 0 and iteration > 0:
+            new_frames = new_frames[num_start_frames:]
 
         # Accumulate in global buffer
         if iteration == 0:
@@ -229,6 +239,10 @@ class FrameAccumulator:
             # Final iteration - clean up buffer reference (frames already returned)
             if session_id in FRAME_BUFFERS:
                 del FRAME_BUFFERS[session_id]
+            # Reset widgets so the workflow is ready for the next run
+            PromptServer.instance.send_sync("mmz-iter-reset", {
+                "session_id": session_id + 1,
+            })
 
         return (all_frames, all_frames.shape[0], last_frame)
 

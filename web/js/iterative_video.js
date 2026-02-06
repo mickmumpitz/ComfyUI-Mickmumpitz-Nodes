@@ -18,9 +18,9 @@ function setWidgetValue(node, widgetName, value) {
     }
 }
 
-// Update iteration widgets and previous_frame_path on all relevant nodes
+// Update iteration widgets and sync session_id on all relevant nodes
 api.addEventListener("mmz-iter-update", ({ detail }) => {
-    const { iteration, last_frame_path } = detail;
+    const { session_id, iteration, last_frame_path } = detail;
 
     for (const type of ITER_NODE_TYPES) {
         for (const node of findNodesByType(type)) {
@@ -29,7 +29,28 @@ api.addEventListener("mmz-iter-update", ({ detail }) => {
     }
 
     for (const node of findNodesByType("IterVideoRouter")) {
+        setWidgetValue(node, "session_id", session_id);
         setWidgetValue(node, "previous_frame_path", last_frame_path);
+    }
+});
+
+// After final iteration, reset widgets so the workflow is ready for the next run
+api.addEventListener("mmz-iter-reset", ({ detail }) => {
+    const { session_id } = detail;
+
+    for (const type of ITER_NODE_TYPES) {
+        for (const node of findNodesByType(type)) {
+            setWidgetValue(node, "iteration", 0);
+        }
+    }
+
+    for (const node of findNodesByType("FrameAccumulator")) {
+        setWidgetValue(node, "session_id", session_id);
+    }
+
+    for (const node of findNodesByType("IterVideoRouter")) {
+        setWidgetValue(node, "session_id", session_id);
+        setWidgetValue(node, "previous_frame_path", "");
     }
 });
 
