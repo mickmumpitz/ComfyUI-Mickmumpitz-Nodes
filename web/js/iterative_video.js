@@ -3,6 +3,7 @@ import { api } from "../../../scripts/api.js";
 
 const ITER_NODE_TYPES = [
     "IterVideoRouter",
+    "IterationSwitch",
     "ControlImageSlicer",
     "FrameAccumulator",
 ];

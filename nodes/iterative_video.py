@@ -93,6 +93,31 @@ class IterVideoRouter:
         return (start_image, num_start_frames)
 
 
+class IterationSwitch:
+    """Passes original on iteration 0, processed on iteration 1+.
+    Use this to conditionally apply processing (e.g. color correction) only after the first iteration."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original": ("IMAGE",),
+                "processed": ("IMAGE",),
+                "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "switch"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def switch(self, original, processed, iteration):
+        if iteration == 0:
+            return (original,)
+        return (processed,)
+
+
 class ControlImageSlicer:
     """Slices the full control image batch for the current iteration."""
 
@@ -183,6 +208,7 @@ class FrameAccumulator:
             },
             "optional": {
                 "num_start_frames": ("INT", {"default": 0, "min": 0, "max": 99}),
+                "blend_overlap": ("BOOLEAN", {"default": False}),
                 "save_intermediate": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
@@ -203,16 +229,26 @@ class FrameAccumulator:
         return float("NaN")
 
     def accumulate(self, new_frames, iteration, total_iterations, session_id,
-                   num_start_frames=0, save_intermediate=False,
+                   num_start_frames=0, blend_overlap=False, save_intermediate=False,
                    unique_id=None, prompt=None, extra_pnginfo=None):
-        # Trim start frames that overlap with the previous iteration
-        if num_start_frames > 0 and iteration > 0:
-            new_frames = new_frames[num_start_frames:]
-
-        # Accumulate in global buffer
         if iteration == 0:
             FRAME_BUFFERS[session_id] = new_frames.cpu()
         else:
+            if num_start_frames > 0:
+                if blend_overlap:
+                    # Cross-fade the overlapping region instead of hard-cutting
+                    n = num_start_frames
+                    buffer_tail = FRAME_BUFFERS[session_id][-n:]
+                    new_head = new_frames[:n].cpu()
+                    # Alpha ramp: 1.0 (keep buffer) → 0.0 (keep new)
+                    alpha = torch.linspace(1.0, 0.0, n).view(n, 1, 1, 1)
+                    blended = buffer_tail * alpha + new_head * (1.0 - alpha)
+                    FRAME_BUFFERS[session_id][-n:] = blended
+                    new_frames = new_frames[n:]
+                else:
+                    # Hard trim: discard duplicate start frames
+                    new_frames = new_frames[num_start_frames:]
+
             FRAME_BUFFERS[session_id] = torch.cat(
                 [FRAME_BUFFERS[session_id], new_frames.cpu()], dim=0
             )
@@ -249,12 +285,14 @@ class FrameAccumulator:
 
 NODE_CLASS_MAPPINGS = {
     "IterVideoRouter": IterVideoRouter,
+    "IterationSwitch": IterationSwitch,
     "ControlImageSlicer": ControlImageSlicer,
     "FrameAccumulator": FrameAccumulator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IterVideoRouter": "Iter Video Router",
+    "IterationSwitch": "Iteration Switch",
     "ControlImageSlicer": "Control Image Slicer",
     "FrameAccumulator": "Frame Accumulator",
 }
