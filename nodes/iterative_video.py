@@ -6,7 +6,6 @@ Uses server events + client-side JS to re-queue the workflow each iteration.
 """
 
 import os
-import uuid
 import torch
 import numpy as np
 from PIL import Image
@@ -14,15 +13,17 @@ from PIL import Image
 import folder_paths
 from server import PromptServer
 
-# Global frame buffer: session_id -> tensor (B, H, W, C) on CPU
-FRAME_BUFFERS = {}
+# Global state
+FRAME_BUFFERS = {}   # buffer_key -> tensor (B, H, W, C) on CPU
+FRAME_SIZES = {}     # buffer_key -> list of cumulative frame counts after each iteration
+_ACTIVE_SESSION = None  # buffer_key of the last active FrameAccumulator
 
 
-def save_last_frame_to_temp(last_frame: torch.Tensor, session_id: int) -> str:
+def save_last_frame_to_temp(last_frame: torch.Tensor, buffer_key: str) -> str:
     """Save the last frame tensor to ComfyUI temp dir, return the path."""
     temp_dir = folder_paths.get_temp_directory()
     os.makedirs(temp_dir, exist_ok=True)
-    filename = f"mmz_iter_lastframe_{session_id}.png"
+    filename = f"mmz_iter_lastframe_{buffer_key}.png"
     filepath = os.path.join(temp_dir, filename)
 
     # last_frame shape: (1, H, W, C), values 0-1
@@ -38,10 +39,10 @@ def load_image_as_tensor(filepath: str) -> torch.Tensor:
     return torch.from_numpy(img_np).unsqueeze(0)
 
 
-def save_iteration_frames(frames: torch.Tensor, session_id: int, iteration: int):
+def save_iteration_frames(frames: torch.Tensor, buffer_key: str, iteration: int):
     """Save individual frames from an iteration to the temp directory."""
     temp_dir = folder_paths.get_temp_directory()
-    iter_dir = os.path.join(temp_dir, f"mmz_iter_{session_id}", f"iter_{iteration:04d}")
+    iter_dir = os.path.join(temp_dir, f"mmz_iter_{buffer_key}", f"iter_{iteration:04d}")
     os.makedirs(iter_dir, exist_ok=True)
 
     for i in range(frames.shape[0]):
@@ -58,7 +59,6 @@ class IterVideoRouter:
             "required": {
                 "start_image": ("IMAGE",),
                 "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
-                "session_id": ("INT", {"default": 1, "min": 1, "max": 99999}),
             },
             "optional": {
                 "num_start_frames": ("INT", {"default": 1, "min": 1, "max": 99}),
@@ -75,14 +75,25 @@ class IterVideoRouter:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def route(self, start_image, iteration, session_id, num_start_frames=1, previous_frame_path=""):
+    def route(self, start_image, iteration, num_start_frames=1, previous_frame_path=""):
         if iteration == 0:
             return (start_image, num_start_frames)
 
         # Pull last N frames from the in-memory buffer
-        if session_id in FRAME_BUFFERS:
-            buffer = FRAME_BUFFERS[session_id]
-            start_frames = buffer[-num_start_frames:]
+        if _ACTIVE_SESSION and _ACTIVE_SESSION in FRAME_BUFFERS:
+            buffer = FRAME_BUFFERS[_ACTIVE_SESSION]
+
+            # Use FRAME_SIZES to find the correct read position.
+            # Critical during resume: the buffer hasn't been truncated yet,
+            # so reading from the end would grab frames from the wrong iteration.
+            if (_ACTIVE_SESSION in FRAME_SIZES
+                    and len(FRAME_SIZES[_ACTIVE_SESSION]) >= iteration):
+                end_pos = FRAME_SIZES[_ACTIVE_SESSION][iteration - 1]
+                start_pos = max(0, end_pos - num_start_frames)
+                start_frames = buffer[start_pos:end_pos]
+            else:
+                start_frames = buffer[-num_start_frames:]
+
             return (start_frames.to(start_image.device), num_start_frames)
 
         # Fallback: load single frame from disk
@@ -204,11 +215,11 @@ class FrameAccumulator:
                 "new_frames": ("IMAGE",),
                 "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
                 "total_iterations": ("INT", {"default": 5, "min": 1, "max": 9999}),
-                "session_id": ("INT", {"default": 1, "min": 1, "max": 99999}),
             },
             "optional": {
                 "num_start_frames": ("INT", {"default": 0, "min": 0, "max": 99}),
                 "blend_overlap": ("BOOLEAN", {"default": False}),
+                "resume_from_iteration": ("INT", {"default": -1, "min": -1, "max": 9999}),
                 "save_intermediate": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
@@ -228,57 +239,81 @@ class FrameAccumulator:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def accumulate(self, new_frames, iteration, total_iterations, session_id,
-                   num_start_frames=0, blend_overlap=False, save_intermediate=False,
+    def accumulate(self, new_frames, iteration, total_iterations,
+                   num_start_frames=0, blend_overlap=False,
+                   resume_from_iteration=-1, save_intermediate=False,
                    unique_id=None, prompt=None, extra_pnginfo=None):
+        global _ACTIVE_SESSION
+        buffer_key = str(unique_id)
+        _ACTIVE_SESSION = buffer_key
+
+        # Handle resume: truncate buffer to before this iteration
+        if (resume_from_iteration >= 0
+                and iteration == resume_from_iteration
+                and iteration > 0
+                and buffer_key in FRAME_BUFFERS
+                and buffer_key in FRAME_SIZES):
+            sizes = FRAME_SIZES[buffer_key]
+            if len(sizes) >= resume_from_iteration:
+                target_size = sizes[resume_from_iteration - 1]
+                FRAME_BUFFERS[buffer_key] = FRAME_BUFFERS[buffer_key][:target_size]
+                FRAME_SIZES[buffer_key] = sizes[:resume_from_iteration]
+
+        # Trim/blend start frames that overlap with the previous iteration
+        if num_start_frames > 0 and iteration > 0:
+            if blend_overlap and buffer_key in FRAME_BUFFERS:
+                # Cross-fade the overlapping region instead of hard-cutting
+                n = num_start_frames
+                buffer_tail = FRAME_BUFFERS[buffer_key][-n:]
+                new_head = new_frames[:n].cpu()
+                # Alpha ramp: 1.0 (keep buffer) -> 0.0 (keep new)
+                alpha = torch.linspace(1.0, 0.0, n).view(n, 1, 1, 1)
+                blended = buffer_tail * alpha + new_head * (1.0 - alpha)
+                FRAME_BUFFERS[buffer_key][-n:] = blended
+                new_frames = new_frames[n:]
+            else:
+                # Hard trim: discard duplicate start frames
+                new_frames = new_frames[num_start_frames:]
+
+        # Accumulate in global buffer
         if iteration == 0:
-            FRAME_BUFFERS[session_id] = new_frames.cpu()
+            FRAME_BUFFERS[buffer_key] = new_frames.cpu()
+            FRAME_SIZES[buffer_key] = []
         else:
-            if num_start_frames > 0:
-                if blend_overlap:
-                    # Cross-fade the overlapping region instead of hard-cutting
-                    n = num_start_frames
-                    buffer_tail = FRAME_BUFFERS[session_id][-n:]
-                    new_head = new_frames[:n].cpu()
-                    # Alpha ramp: 1.0 (keep buffer) → 0.0 (keep new)
-                    alpha = torch.linspace(1.0, 0.0, n).view(n, 1, 1, 1)
-                    blended = buffer_tail * alpha + new_head * (1.0 - alpha)
-                    FRAME_BUFFERS[session_id][-n:] = blended
-                    new_frames = new_frames[n:]
-                else:
-                    # Hard trim: discard duplicate start frames
-                    new_frames = new_frames[num_start_frames:]
+            if buffer_key not in FRAME_BUFFERS:
+                # No buffer exists (e.g., after restart), start fresh
+                FRAME_BUFFERS[buffer_key] = new_frames.cpu()
+                FRAME_SIZES[buffer_key] = []
+            else:
+                FRAME_BUFFERS[buffer_key] = torch.cat(
+                    [FRAME_BUFFERS[buffer_key], new_frames.cpu()], dim=0
+                )
 
-            FRAME_BUFFERS[session_id] = torch.cat(
-                [FRAME_BUFFERS[session_id], new_frames.cpu()], dim=0
-            )
+        # Track buffer size after this iteration
+        if buffer_key not in FRAME_SIZES:
+            FRAME_SIZES[buffer_key] = []
+        FRAME_SIZES[buffer_key].append(FRAME_BUFFERS[buffer_key].shape[0])
 
-        all_frames = FRAME_BUFFERS[session_id]
+        all_frames = FRAME_BUFFERS[buffer_key]
         last_frame = new_frames[-1:]
 
         # Save last frame to temp dir for next iteration's IterVideoRouter
-        last_frame_path = save_last_frame_to_temp(last_frame, session_id)
+        last_frame_path = save_last_frame_to_temp(last_frame, buffer_key)
 
         # Optionally save intermediate frames to disk
         if save_intermediate:
-            save_iteration_frames(new_frames, session_id, iteration)
+            save_iteration_frames(new_frames, buffer_key, iteration)
 
         # Loop control via server events
         if iteration < total_iterations - 1:
             PromptServer.instance.send_sync("mmz-iter-update", {
-                "session_id": session_id,
                 "iteration": iteration + 1,
                 "last_frame_path": last_frame_path,
             })
             PromptServer.instance.send_sync("mmz-add-queue", {})
         else:
-            # Final iteration - clean up buffer reference (frames already returned)
-            if session_id in FRAME_BUFFERS:
-                del FRAME_BUFFERS[session_id]
-            # Reset widgets so the workflow is ready for the next run
-            PromptServer.instance.send_sync("mmz-iter-reset", {
-                "session_id": session_id + 1,
-            })
+            # Final iteration — reset widgets for next run (buffer kept for potential resume)
+            PromptServer.instance.send_sync("mmz-iter-reset", {})
 
         return (all_frames, all_frames.shape[0], last_frame)
 

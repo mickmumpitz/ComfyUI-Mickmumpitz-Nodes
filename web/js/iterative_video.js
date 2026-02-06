@@ -19,9 +19,44 @@ function setWidgetValue(node, widgetName, value) {
     }
 }
 
-// Update iteration widgets and sync session_id on all relevant nodes
+function getWidgetValue(node, widgetName) {
+    const widget = node.widgets?.find((w) => w.name === widgetName);
+    return widget ? widget.value : undefined;
+}
+
+// Track whether a queue was triggered by the auto-requeue loop
+let _isAutoRequeue = false;
+
+app.registerExtension({
+    name: "Mickmumpitz.IterativeVideo",
+    async setup() {
+        // Intercept queuePrompt to handle resume logic on manual queues
+        const _origQueuePrompt = app.queuePrompt.bind(app);
+        app.queuePrompt = async function (number, batchCount) {
+            if (!_isAutoRequeue) {
+                // Manual queue — check if resume is requested
+                for (const node of findNodesByType("FrameAccumulator")) {
+                    const resumeFrom = getWidgetValue(node, "resume_from_iteration");
+                    if (resumeFrom !== undefined && resumeFrom >= 0) {
+                        // Set iteration on all iter nodes to the resume point
+                        for (const type of ITER_NODE_TYPES) {
+                            for (const n of findNodesByType(type)) {
+                                setWidgetValue(n, "iteration", resumeFrom);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            _isAutoRequeue = false;
+            return _origQueuePrompt(number, batchCount);
+        };
+    },
+});
+
+// Update iteration widgets on all relevant nodes
 api.addEventListener("mmz-iter-update", ({ detail }) => {
-    const { session_id, iteration, last_frame_path } = detail;
+    const { iteration, last_frame_path } = detail;
 
     for (const type of ITER_NODE_TYPES) {
         for (const node of findNodesByType(type)) {
@@ -30,15 +65,12 @@ api.addEventListener("mmz-iter-update", ({ detail }) => {
     }
 
     for (const node of findNodesByType("IterVideoRouter")) {
-        setWidgetValue(node, "session_id", session_id);
         setWidgetValue(node, "previous_frame_path", last_frame_path);
     }
 });
 
-// After final iteration, reset widgets so the workflow is ready for the next run
-api.addEventListener("mmz-iter-reset", ({ detail }) => {
-    const { session_id } = detail;
-
+// After final iteration, reset widgets for next run
+api.addEventListener("mmz-iter-reset", () => {
     for (const type of ITER_NODE_TYPES) {
         for (const node of findNodesByType(type)) {
             setWidgetValue(node, "iteration", 0);
@@ -46,16 +78,16 @@ api.addEventListener("mmz-iter-reset", ({ detail }) => {
     }
 
     for (const node of findNodesByType("FrameAccumulator")) {
-        setWidgetValue(node, "session_id", session_id);
+        setWidgetValue(node, "resume_from_iteration", -1);
     }
 
     for (const node of findNodesByType("IterVideoRouter")) {
-        setWidgetValue(node, "session_id", session_id);
         setWidgetValue(node, "previous_frame_path", "");
     }
 });
 
 // Re-queue the workflow for next iteration
 api.addEventListener("mmz-add-queue", () => {
+    _isAutoRequeue = true;
     app.queuePrompt(0, 1);
 });
