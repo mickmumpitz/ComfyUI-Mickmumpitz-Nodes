@@ -11,7 +11,6 @@ import numpy as np
 from PIL import Image
 
 import folder_paths
-from aiohttp import web
 from server import PromptServer
 
 # Global state
@@ -19,25 +18,6 @@ FRAME_BUFFERS = {}   # buffer_key -> tensor (B, H, W, C) on CPU
 FRAME_SIZES = {}     # buffer_key -> list of cumulative frame counts after each iteration
 _ACTIVE_SESSION = None  # buffer_key of the last active FrameAccumulator
 _ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
-_IS_AUTO_REQUEUE = False
-
-
-@PromptServer.instance.routes.post("/mmz-iter/reset-session")
-async def reset_session(request):
-    """Clear iteration state for a fresh run. Buffers kept for resume."""
-    global _ACTIVE_SESSION, _IS_AUTO_REQUEUE
-    _ACTIVE_SESSION = None
-    _ITERATION_STATE.clear()
-    _IS_AUTO_REQUEUE = False
-    return web.json_response({"status": "ok"})
-
-
-@PromptServer.instance.routes.post("/mmz-iter/auto-requeue")
-async def auto_requeue(request):
-    """Mark the next prompt submission as an auto-requeue (not a manual queue)."""
-    global _IS_AUTO_REQUEUE
-    _IS_AUTO_REQUEUE = True
-    return web.json_response({"status": "ok"})
 
 
 # Iter node class names whose "iteration" input should be overridden
@@ -50,12 +30,13 @@ def _on_prompt_handler(json_data):
     This is necessary because inside ComfyUI group nodes (subgraphs), inner
     nodes are NOT in app.graph._nodes, so the JS widget-update approach fails.
     The prompt dict, however, always contains the expanded inner nodes.
-    """
-    global _IS_AUTO_REQUEUE
-    is_auto = _IS_AUTO_REQUEUE
-    _IS_AUTO_REQUEUE = False
 
+    Auto-requeue is detected via a per-prompt marker in extra_data (not a
+    global flag), so concurrent/queued prompts can't corrupt each other.
+    """
     prompt = json_data.get("prompt", {})
+    extra_data = json_data.get("extra_data", {})
+    is_auto = extra_data.get("mmz_auto_requeue", False)
 
     if is_auto and _ITERATION_STATE:
         # Auto-requeue: inject iteration into all iter nodes from Python-side state.

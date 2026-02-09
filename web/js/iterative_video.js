@@ -12,25 +12,30 @@ function setWidgetValue(node, widgetName, value) {
     }
 }
 
-// Track whether a queue was triggered by the auto-requeue loop
-let _isAutoRequeue = false;
+// When true, the next POST /prompt will be tagged as an auto-requeue
+// via extra_data so the Python prompt handler can identify it.
+let _pendingAutoRequeue = false;
 
 app.registerExtension({
     name: "Mickmumpitz.IterativeVideo",
     async setup() {
-        // Intercept queuePrompt to clear Python-side state on manual queues
-        const _origQueuePrompt = app.queuePrompt.bind(app);
-        app.queuePrompt = async function (number, batchCount) {
-            if (!_isAutoRequeue) {
-                // Manual queue — clear Python-side iteration state
+        // Intercept fetchApi to embed the auto-requeue marker directly
+        // in the prompt JSON. This avoids global-flag race conditions
+        // when multiple prompts are queued.
+        const _origFetch = api.fetchApi.bind(api);
+        api.fetchApi = async function (route, options = {}) {
+            if (_pendingAutoRequeue && route === "/prompt" && options?.method === "POST") {
+                _pendingAutoRequeue = false;
                 try {
-                    await api.fetchApi("/mmz-iter/reset-session", { method: "POST" });
+                    const body = JSON.parse(options.body);
+                    body.extra_data = body.extra_data || {};
+                    body.extra_data.mmz_auto_requeue = true;
+                    options.body = JSON.stringify(body);
                 } catch (e) {
-                    console.warn("[MMZ Iter] Failed to reset session:", e);
+                    console.warn("[MMZ Iter] Failed to mark auto-requeue:", e);
                 }
             }
-            _isAutoRequeue = false;
-            return _origQueuePrompt(number, batchCount);
+            return _origFetch(route, options);
         };
     },
 });
@@ -42,13 +47,9 @@ api.addEventListener("mmz-iter-reset", () => {
     }
 });
 
-// Re-queue the workflow for next iteration
-api.addEventListener("mmz-add-queue", async () => {
-    try {
-        await api.fetchApi("/mmz-iter/auto-requeue", { method: "POST" });
-    } catch (e) {
-        console.warn("[MMZ Iter] Failed to mark auto-requeue:", e);
-    }
-    _isAutoRequeue = true;
-    app.queuePrompt(0, 1);
+// Re-queue at front of queue for next iteration.
+// Front-of-queue (-1) ensures all iterations complete before the next job.
+api.addEventListener("mmz-add-queue", () => {
+    _pendingAutoRequeue = true;
+    app.queuePrompt(-1, 1);
 });
