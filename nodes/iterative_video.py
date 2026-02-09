@@ -58,19 +58,17 @@ def _on_prompt_handler(json_data):
     prompt = json_data.get("prompt", {})
 
     if is_auto and _ITERATION_STATE:
-        # Auto-requeue: override all iter nodes to the Python-side iteration.
-        # We override unconditionally (even linked inputs) because inside group
-        # nodes, widget values appear as links to internal relay nodes.
+        # Auto-requeue: inject iteration into all iter nodes from Python-side state.
+        # Always set (not just override) since iteration is now a hidden input.
         iteration = _ITERATION_STATE["iteration"]
         last_frame_path = _ITERATION_STATE.get("last_frame_path", "")
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
             if class_type not in _ITER_NODE_TYPES:
                 continue
-            inputs = node_data.get("inputs", {})
-            if "iteration" in inputs:
-                inputs["iteration"] = iteration
-            if class_type == "IterVideoRouter" and "previous_frame_path" in inputs:
+            inputs = node_data.setdefault("inputs", {})
+            inputs["iteration"] = iteration
+            if class_type == "IterVideoRouter":
                 inputs["previous_frame_path"] = last_frame_path
         return json_data
 
@@ -89,14 +87,11 @@ def _on_prompt_handler(json_data):
                     resume_iter = int(resume_val)
                     # Restore active session so IterVideoRouter can find the buffer
                     _ACTIVE_SESSION = buffer_key
-                    # Override all iter nodes to resume point (unconditionally,
-                    # including linked inputs for group node compatibility)
+                    # Inject iteration into all iter nodes
                     for nid, nd in prompt.items():
                         ct = nd.get("class_type", "")
                         if ct in _ITER_NODE_TYPES:
-                            nd_inputs = nd.get("inputs", {})
-                            if "iteration" in nd_inputs:
-                                nd_inputs["iteration"] = resume_iter
+                            nd.setdefault("inputs", {})["iteration"] = resume_iter
                     break
     return json_data
 
@@ -143,11 +138,13 @@ class IterVideoRouter:
         return {
             "required": {
                 "start_image": ("IMAGE",),
-                "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
             },
             "optional": {
                 "num_start_frames": ("INT", {"default": 1, "min": 1, "max": 99}),
-                "previous_frame_path": ("STRING", {"default": "", "multiline": False}),
+            },
+            "hidden": {
+                "iteration": "INT",
+                "previous_frame_path": "STRING",
             },
         }
 
@@ -160,7 +157,7 @@ class IterVideoRouter:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def route(self, start_image, iteration, num_start_frames=1, previous_frame_path=""):
+    def route(self, start_image, iteration=0, num_start_frames=1, previous_frame_path=""):
         if iteration == 0:
             return (start_image, num_start_frames)
 
@@ -199,7 +196,9 @@ class IterationSwitch:
             "required": {
                 "original": ("IMAGE",),
                 "processed": ("IMAGE",),
-                "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
+            },
+            "hidden": {
+                "iteration": "INT",
             },
         }
 
@@ -208,7 +207,7 @@ class IterationSwitch:
     FUNCTION = "switch"
     CATEGORY = "Mickmumpitz/video/iteration"
 
-    def switch(self, original, processed, iteration):
+    def switch(self, original, processed, iteration=0):
         if iteration == 0:
             return (original,)
         return (processed,)
@@ -223,11 +222,13 @@ class ControlImageSlicer:
             "required": {
                 "control_images": ("IMAGE",),
                 "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
-                "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
             },
             "optional": {
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 999}),
                 "extend_mode": (["none", "repeat_last", "loop"],),
+            },
+            "hidden": {
+                "iteration": "INT",
             },
         }
 
@@ -236,7 +237,7 @@ class ControlImageSlicer:
     FUNCTION = "slice"
     CATEGORY = "Mickmumpitz/video/iteration"
 
-    def slice(self, control_images, frames_per_iteration, iteration,
+    def slice(self, control_images, frames_per_iteration, iteration=0,
               overlap_frames=0, extend_mode="none"):
         total = control_images.shape[0]
 
@@ -298,7 +299,6 @@ class FrameAccumulator:
         return {
             "required": {
                 "new_frames": ("IMAGE",),
-                "iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
                 "total_iterations": ("INT", {"default": 5, "min": 1, "max": 9999}),
             },
             "optional": {
@@ -308,6 +308,7 @@ class FrameAccumulator:
                 "save_intermediate": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
+                "iteration": "INT",
                 "unique_id": "UNIQUE_ID",
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -324,8 +325,8 @@ class FrameAccumulator:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def accumulate(self, new_frames, iteration, total_iterations,
-                   num_start_frames=0, blend_overlap=False,
+    def accumulate(self, new_frames, total_iterations,
+                   iteration=0, num_start_frames=0, blend_overlap=False,
                    resume_from_iteration=0, save_intermediate=False,
                    unique_id=None, prompt=None, extra_pnginfo=None):
         global _ACTIVE_SESSION
@@ -398,11 +399,6 @@ class FrameAccumulator:
             _ITERATION_STATE["iteration"] = iteration + 1
             _ITERATION_STATE["last_frame_path"] = last_frame_path
 
-            # Cosmetic widget update for non-subgraph nodes
-            PromptServer.instance.send_sync("mmz-iter-update", {
-                "iteration": iteration + 1,
-                "last_frame_path": last_frame_path,
-            })
             PromptServer.instance.send_sync("mmz-add-queue", {})
         else:
             # Final iteration — clear loop state (buffer kept for potential resume)
