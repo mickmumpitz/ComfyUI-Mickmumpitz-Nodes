@@ -35,6 +35,7 @@ app.registerExtension({
         app.queuePrompt = async function (number, batchCount) {
             if (!_isAutoRequeue) {
                 // Manual queue — check if resume is requested
+                let isResume = false;
                 for (const node of findNodesByType("FrameAccumulator")) {
                     const resumeFrom = getWidgetValue(node, "resume_from_iteration");
                     if (resumeFrom !== undefined && resumeFrom >= 0) {
@@ -44,7 +45,24 @@ app.registerExtension({
                                 setWidgetValue(n, "iteration", resumeFrom);
                             }
                         }
+                        isResume = true;
                         break;
+                    }
+                }
+                if (!isResume) {
+                    // Fresh run: reset iteration to 0 and clear Python-side state
+                    for (const type of ITER_NODE_TYPES) {
+                        for (const n of findNodesByType(type)) {
+                            setWidgetValue(n, "iteration", 0);
+                        }
+                    }
+                    for (const node of findNodesByType("IterVideoRouter")) {
+                        setWidgetValue(node, "previous_frame_path", "");
+                    }
+                    try {
+                        await api.fetchApi("/mmz-iter/reset-session", { method: "POST" });
+                    } catch (e) {
+                        console.warn("[MMZ Iter] Failed to reset session:", e);
                     }
                 }
             }

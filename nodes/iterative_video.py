@@ -11,12 +11,23 @@ import numpy as np
 from PIL import Image
 
 import folder_paths
+from aiohttp import web
 from server import PromptServer
 
 # Global state
 FRAME_BUFFERS = {}   # buffer_key -> tensor (B, H, W, C) on CPU
 FRAME_SIZES = {}     # buffer_key -> list of cumulative frame counts after each iteration
 _ACTIVE_SESSION = None  # buffer_key of the last active FrameAccumulator
+
+
+@PromptServer.instance.routes.post("/mmz-iter/reset-session")
+async def reset_session(request):
+    """Clear all iterative-video state for a fresh run."""
+    global _ACTIVE_SESSION
+    _ACTIVE_SESSION = None
+    FRAME_BUFFERS.clear()
+    FRAME_SIZES.clear()
+    return web.json_response({"status": "ok"})
 
 
 def save_last_frame_to_temp(last_frame: torch.Tensor, buffer_key: str) -> str:
