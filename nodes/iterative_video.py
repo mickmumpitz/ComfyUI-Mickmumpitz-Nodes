@@ -76,6 +76,7 @@ def _on_prompt_handler(json_data):
 
     # Not an auto-requeue — check for resume
     if not _ITERATION_STATE:
+        global _ACTIVE_SESSION
         for node_id, node_data in prompt.items():
             if node_data.get("class_type") != "FrameAccumulator":
                 continue
@@ -86,6 +87,8 @@ def _on_prompt_handler(json_data):
                 buffer_key = str(node_id)
                 if buffer_key in FRAME_BUFFERS:
                     resume_iter = int(resume_val)
+                    # Restore active session so IterVideoRouter can find the buffer
+                    _ACTIVE_SESSION = buffer_key
                     # Override all iter nodes to resume point (unconditionally,
                     # including linked inputs for group node compatibility)
                     for nid, nd in prompt.items():
