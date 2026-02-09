@@ -34,12 +34,19 @@ app.registerExtension({
         const _origQueuePrompt = app.queuePrompt.bind(app);
         app.queuePrompt = async function (number, batchCount) {
             if (!_isAutoRequeue) {
-                // Manual queue — check if resume is requested
+                // Manual queue — always clear Python-side iteration state first
+                try {
+                    await api.fetchApi("/mmz-iter/reset-session", { method: "POST" });
+                } catch (e) {
+                    console.warn("[MMZ Iter] Failed to reset session:", e);
+                }
+
+                // Check if resume is requested
                 let isResume = false;
                 for (const node of findNodesByType("FrameAccumulator")) {
                     const resumeFrom = getWidgetValue(node, "resume_from_iteration");
                     if (resumeFrom !== undefined && resumeFrom >= 0) {
-                        // Set iteration on all iter nodes to the resume point
+                        // Cosmetic: set iteration widgets for non-subgraph nodes
                         for (const type of ITER_NODE_TYPES) {
                             for (const n of findNodesByType(type)) {
                                 setWidgetValue(n, "iteration", resumeFrom);
@@ -50,7 +57,7 @@ app.registerExtension({
                     }
                 }
                 if (!isResume) {
-                    // Fresh run: reset iteration to 0 and clear Python-side state
+                    // Fresh run: reset iteration widgets to 0 (cosmetic for non-subgraph)
                     for (const type of ITER_NODE_TYPES) {
                         for (const n of findNodesByType(type)) {
                             setWidgetValue(n, "iteration", 0);
@@ -58,11 +65,6 @@ app.registerExtension({
                     }
                     for (const node of findNodesByType("IterVideoRouter")) {
                         setWidgetValue(node, "previous_frame_path", "");
-                    }
-                    try {
-                        await api.fetchApi("/mmz-iter/reset-session", { method: "POST" });
-                    } catch (e) {
-                        console.warn("[MMZ Iter] Failed to reset session:", e);
                     }
                 }
             }
@@ -105,7 +107,12 @@ api.addEventListener("mmz-iter-reset", () => {
 });
 
 // Re-queue the workflow for next iteration
-api.addEventListener("mmz-add-queue", () => {
+api.addEventListener("mmz-add-queue", async () => {
+    try {
+        await api.fetchApi("/mmz-iter/auto-requeue", { method: "POST" });
+    } catch (e) {
+        console.warn("[MMZ Iter] Failed to mark auto-requeue:", e);
+    }
     _isAutoRequeue = true;
     app.queuePrompt(0, 1);
 });

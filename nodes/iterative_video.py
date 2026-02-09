@@ -18,16 +18,87 @@ from server import PromptServer
 FRAME_BUFFERS = {}   # buffer_key -> tensor (B, H, W, C) on CPU
 FRAME_SIZES = {}     # buffer_key -> list of cumulative frame counts after each iteration
 _ACTIVE_SESSION = None  # buffer_key of the last active FrameAccumulator
+_ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
+_IS_AUTO_REQUEUE = False
 
 
 @PromptServer.instance.routes.post("/mmz-iter/reset-session")
 async def reset_session(request):
-    """Clear all iterative-video state for a fresh run."""
-    global _ACTIVE_SESSION
+    """Clear iteration state for a fresh run. Buffers kept for resume."""
+    global _ACTIVE_SESSION, _IS_AUTO_REQUEUE
     _ACTIVE_SESSION = None
-    FRAME_BUFFERS.clear()
-    FRAME_SIZES.clear()
+    _ITERATION_STATE.clear()
+    _IS_AUTO_REQUEUE = False
     return web.json_response({"status": "ok"})
+
+
+@PromptServer.instance.routes.post("/mmz-iter/auto-requeue")
+async def auto_requeue(request):
+    """Mark the next prompt submission as an auto-requeue (not a manual queue)."""
+    global _IS_AUTO_REQUEUE
+    _IS_AUTO_REQUEUE = True
+    return web.json_response({"status": "ok"})
+
+
+# Iter node class names whose "iteration" input should be overridden
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "FrameAccumulator"}
+
+
+def _on_prompt_handler(json_data):
+    """Intercept every POST /prompt to inject the correct iteration value.
+
+    This is necessary because inside ComfyUI group nodes (subgraphs), inner
+    nodes are NOT in app.graph._nodes, so the JS widget-update approach fails.
+    The prompt dict, however, always contains the expanded inner nodes.
+    """
+    global _IS_AUTO_REQUEUE
+    is_auto = _IS_AUTO_REQUEUE
+    _IS_AUTO_REQUEUE = False
+
+    prompt = json_data.get("prompt", {})
+
+    if is_auto and _ITERATION_STATE:
+        # Auto-requeue: override all iter nodes to the Python-side iteration.
+        # We override unconditionally (even linked inputs) because inside group
+        # nodes, widget values appear as links to internal relay nodes.
+        iteration = _ITERATION_STATE["iteration"]
+        last_frame_path = _ITERATION_STATE.get("last_frame_path", "")
+        for node_id, node_data in prompt.items():
+            class_type = node_data.get("class_type", "")
+            if class_type not in _ITER_NODE_TYPES:
+                continue
+            inputs = node_data.get("inputs", {})
+            if "iteration" in inputs:
+                inputs["iteration"] = iteration
+            if class_type == "IterVideoRouter" and "previous_frame_path" in inputs:
+                inputs["previous_frame_path"] = last_frame_path
+        return json_data
+
+    # Not an auto-requeue — check for resume
+    if not _ITERATION_STATE:
+        for node_id, node_data in prompt.items():
+            if node_data.get("class_type") != "FrameAccumulator":
+                continue
+            inputs = node_data.get("inputs", {})
+            resume_val = inputs.get("resume_from_iteration")
+            # Only detect resume if it's a literal int > 0 (not a link)
+            if isinstance(resume_val, (int, float)) and int(resume_val) > 0:
+                buffer_key = str(node_id)
+                if buffer_key in FRAME_BUFFERS:
+                    resume_iter = int(resume_val)
+                    # Override all iter nodes to resume point (unconditionally,
+                    # including linked inputs for group node compatibility)
+                    for nid, nd in prompt.items():
+                        ct = nd.get("class_type", "")
+                        if ct in _ITER_NODE_TYPES:
+                            nd_inputs = nd.get("inputs", {})
+                            if "iteration" in nd_inputs:
+                                nd_inputs["iteration"] = resume_iter
+                    break
+    return json_data
+
+
+PromptServer.instance.add_on_prompt_handler(_on_prompt_handler)
 
 
 def save_last_frame_to_temp(last_frame: torch.Tensor, buffer_key: str) -> str:
@@ -258,6 +329,10 @@ class FrameAccumulator:
         buffer_key = str(unique_id)
         _ACTIVE_SESSION = buffer_key
 
+        # Safety: clear iteration state on fresh start so stale state can't persist
+        if iteration == 0:
+            _ITERATION_STATE.clear()
+
         # Handle resume: truncate buffer to before this iteration
         if (resume_from_iteration >= 0
                 and iteration == resume_from_iteration
@@ -317,13 +392,19 @@ class FrameAccumulator:
 
         # Loop control via server events
         if iteration < total_iterations - 1:
+            # Set Python-side state BEFORE triggering re-queue
+            _ITERATION_STATE["iteration"] = iteration + 1
+            _ITERATION_STATE["last_frame_path"] = last_frame_path
+
+            # Cosmetic widget update for non-subgraph nodes
             PromptServer.instance.send_sync("mmz-iter-update", {
                 "iteration": iteration + 1,
                 "last_frame_path": last_frame_path,
             })
             PromptServer.instance.send_sync("mmz-add-queue", {})
         else:
-            # Final iteration — reset widgets for next run (buffer kept for potential resume)
+            # Final iteration — clear loop state (buffer kept for potential resume)
+            _ITERATION_STATE.clear()
             PromptServer.instance.send_sync("mmz-iter-reset", {})
 
         return (all_frames, all_frames.shape[0], last_frame)
