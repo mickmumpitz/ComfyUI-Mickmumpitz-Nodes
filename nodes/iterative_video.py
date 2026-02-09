@@ -99,11 +99,16 @@ def _on_prompt_handler(json_data):
 PromptServer.instance.add_on_prompt_handler(_on_prompt_handler)
 
 
+def _safe_filename(buffer_key: str) -> str:
+    """Sanitize buffer_key for use in file/directory names (colon is illegal on Windows)."""
+    return buffer_key.replace(":", "_")
+
+
 def save_last_frame_to_temp(last_frame: torch.Tensor, buffer_key: str) -> str:
     """Save the last frame tensor to ComfyUI temp dir, return the path."""
     temp_dir = folder_paths.get_temp_directory()
     os.makedirs(temp_dir, exist_ok=True)
-    filename = f"mmz_iter_lastframe_{buffer_key}.png"
+    filename = f"mmz_iter_lastframe_{_safe_filename(buffer_key)}.png"
     filepath = os.path.join(temp_dir, filename)
 
     # last_frame shape: (1, H, W, C), values 0-1
@@ -122,7 +127,7 @@ def load_image_as_tensor(filepath: str) -> torch.Tensor:
 def save_iteration_frames(frames: torch.Tensor, buffer_key: str, iteration: int):
     """Save individual frames from an iteration to the temp directory."""
     temp_dir = folder_paths.get_temp_directory()
-    iter_dir = os.path.join(temp_dir, f"mmz_iter_{buffer_key}", f"iter_{iteration:04d}")
+    iter_dir = os.path.join(temp_dir, f"mmz_iter_{_safe_filename(buffer_key)}", f"iter_{iteration:04d}")
     os.makedirs(iter_dir, exist_ok=True)
 
     for i in range(frames.shape[0]):
