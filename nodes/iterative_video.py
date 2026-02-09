@@ -304,7 +304,7 @@ class FrameAccumulator:
             "optional": {
                 "num_start_frames": ("INT", {"default": 0, "min": 0, "max": 99}),
                 "blend_overlap": ("BOOLEAN", {"default": False}),
-                "resume_from_iteration": ("INT", {"default": -1, "min": -1, "max": 9999}),
+                "resume_from_iteration": ("INT", {"default": 0, "min": 0, "max": 9999}),
                 "save_intermediate": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
@@ -326,7 +326,7 @@ class FrameAccumulator:
 
     def accumulate(self, new_frames, iteration, total_iterations,
                    num_start_frames=0, blend_overlap=False,
-                   resume_from_iteration=-1, save_intermediate=False,
+                   resume_from_iteration=0, save_intermediate=False,
                    unique_id=None, prompt=None, extra_pnginfo=None):
         global _ACTIVE_SESSION
         buffer_key = str(unique_id)
@@ -337,9 +337,8 @@ class FrameAccumulator:
             _ITERATION_STATE.clear()
 
         # Handle resume: truncate buffer to before this iteration
-        if (resume_from_iteration >= 0
+        if (resume_from_iteration > 0
                 and iteration == resume_from_iteration
-                and iteration > 0
                 and buffer_key in FRAME_BUFFERS
                 and buffer_key in FRAME_SIZES):
             sizes = FRAME_SIZES[buffer_key]

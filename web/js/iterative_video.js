@@ -45,7 +45,7 @@ app.registerExtension({
                 let isResume = false;
                 for (const node of findNodesByType("FrameAccumulator")) {
                     const resumeFrom = getWidgetValue(node, "resume_from_iteration");
-                    if (resumeFrom !== undefined && resumeFrom >= 0) {
+                    if (resumeFrom !== undefined && resumeFrom > 0) {
                         // Cosmetic: set iteration widgets for non-subgraph nodes
                         for (const type of ITER_NODE_TYPES) {
                             for (const n of findNodesByType(type)) {
@@ -98,7 +98,7 @@ api.addEventListener("mmz-iter-reset", () => {
     }
 
     for (const node of findNodesByType("FrameAccumulator")) {
-        setWidgetValue(node, "resume_from_iteration", -1);
+        setWidgetValue(node, "resume_from_iteration", 0);
     }
 
     for (const node of findNodesByType("IterVideoRouter")) {
