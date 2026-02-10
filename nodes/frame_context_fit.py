@@ -405,13 +405,55 @@ class AnchorFrameExtractor:
         return (images[pick_indices], anchor_data, "\n".join(report_lines))
 
 
+class EndFrameInjector:
+    """
+    Picks the end frame for the current iteration from AnchorFrameExtractor's output.
+
+    anchor_frames[0] is the start frame (iteration 0's key frame at index 0),
+    so the end frame for iteration N is anchor_frames[N + 1].
+    If N + 1 is out of range, falls back to the last anchor frame and sets
+    has_frame = False.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "anchor_frames": ("IMAGE",),
+            },
+            "hidden": {
+                "iteration": ("INT", {"default": 0}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "BOOLEAN",)
+    RETURN_NAMES = ("image", "has_frame",)
+    FUNCTION = "execute"
+    CATEGORY = "image/sequence"
+    DESCRIPTION = (
+        "Picks the end frame for the current iteration from AnchorFrameExtractor's "
+        "anchor frames. Iteration 0 → anchor_frames[1], iteration 1 → anchor_frames[2], etc."
+    )
+
+    def execute(self, anchor_frames: torch.Tensor, iteration: int = 0):
+        total = anchor_frames.shape[0]
+        target_idx = iteration + 1
+
+        if target_idx < total:
+            return (anchor_frames[target_idx].unsqueeze(0), True)
+        else:
+            return (anchor_frames[-1].unsqueeze(0), False)
+
+
 # ── ComfyUI Registration ──
 NODE_CLASS_MAPPINGS = {
     "FrameContextFit": FrameContextFit,
     "AnchorFrameExtractor": AnchorFrameExtractor,
+    "EndFrameInjector": EndFrameInjector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FrameContextFit": "Frame Context Fit 🎞️",
-    "AnchorFrameExtractor": "Anchor Frame Extractor 🎯",
+    "FrameContextFit": "Frame Context Fit",
+    "AnchorFrameExtractor": "Anchor Frame Extractor",
+    "EndFrameInjector": "End Frame Injector",
 }

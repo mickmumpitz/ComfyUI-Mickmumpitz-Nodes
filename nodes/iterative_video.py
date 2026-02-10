@@ -21,7 +21,7 @@ _ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
 
 
 # Iter node class names whose "iteration" input should be overridden
-_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "FrameAccumulator"}
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "FrameAccumulator", "EndFrameInjector"}
 
 
 def _on_prompt_handler(json_data):
