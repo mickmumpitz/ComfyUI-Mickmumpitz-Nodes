@@ -385,11 +385,11 @@ class FrameAccumulator:
             _ITERATION_STATE["iteration"] = iteration + 1
             _ITERATION_STATE["last_frame_path"] = last_frame_path
 
-            PromptServer.instance.send_sync("mmz-add-queue", {})
+            PromptServer.instance.send_sync("mmz-add-queue", {}, PromptServer.instance.client_id)
         else:
             # Final iteration — clear loop state (buffer kept for potential resume)
             _ITERATION_STATE.clear()
-            PromptServer.instance.send_sync("mmz-iter-reset", {})
+            PromptServer.instance.send_sync("mmz-iter-reset", {}, PromptServer.instance.client_id)
 
         return (all_frames, all_frames.shape[0], last_frame)
 
