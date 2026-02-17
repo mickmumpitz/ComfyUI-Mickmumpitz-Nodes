@@ -34,6 +34,29 @@ class PreprocessSettings:
         return (signal,)
 
 
+class PreprocessSettingsSimple:
+    """
+    Preprocessing method selector without a toggle.
+    Always outputs the selected method as the signal.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "method": (PREPROCESS_OPTIONS, {"default": PREPROCESS_OPTIONS[0]}),
+            },
+        }
+
+    RETURN_TYPES = ("PREPROCESS_SIGNAL",)
+    RETURN_NAMES = ("signal",)
+    FUNCTION = "get_signal"
+    CATEGORY = "Mickmumpitz/utils"
+
+    def get_signal(self, method: str):
+        return (method.lower(),)
+
+
 class PreprocessSwitch:
     """
     Routes images based on the preprocess signal.
@@ -85,10 +108,12 @@ class PreprocessSwitch:
 
 NODE_CLASS_MAPPINGS = {
     "PreprocessSettings": PreprocessSettings,
+    "PreprocessSettingsSimple": PreprocessSettingsSimple,
     "PreprocessSwitch": PreprocessSwitch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PreprocessSettings": "Preprocess Settings",
+    "PreprocessSettingsSimple": "Preprocess Settings (Simple)",
     "PreprocessSwitch": "Preprocess Switch",
 }
