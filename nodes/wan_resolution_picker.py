@@ -12,7 +12,7 @@ RESOLUTIONS = {
 }
 
 RESOLUTION_LIST = list(RESOLUTIONS.keys())
-ASPECT_RATIOS = ["16:9", "9:16 (Vertical)"]
+ASPECT_RATIOS = ["16:9", "9:16 (Vertical)", "1:1 (Square)"]
 
 
 class WanResolutionPicker:
@@ -44,6 +44,8 @@ class WanResolutionPicker:
 
         if aspect_ratio == "9:16 (Vertical)":
             return (height, width)
+        elif aspect_ratio == "1:1 (Square)":
+            return (height, height)
         return (width, height)
 
 
