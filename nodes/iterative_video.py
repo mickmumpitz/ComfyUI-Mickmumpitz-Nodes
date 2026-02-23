@@ -21,7 +21,7 @@ _ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
 
 
 # Iter node class names whose "iteration" input should be overridden
-_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "FrameAccumulator", "EndFrameInjector"}
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer"}
 
 
 def _on_prompt_handler(json_data):
@@ -394,11 +394,130 @@ class FrameAccumulator:
         return (all_frames, all_frames.shape[0], last_frame)
 
 
+class BoundaryFrameExtractor:
+    """Extracts the boundary frames around the broken region for external interpolation.
+
+    On iteration 0: outputs the original images as-is for both boundary frames
+    (passthrough, no fixing needed).
+    On iteration 1+: outputs the left and right boundary frames so you can feed
+    them into any interpolation node (RIFE, FILM, etc.).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+            },
+            "optional": {
+                "enabled": ("BOOLEAN", {"default": True}),
+                "num_start_frames": ("INT", {"default": 1, "min": 1, "max": 99,
+                                              "tooltip": "Number of overlap/start frames (connect from IterVideoRouter)"}),
+                "frame_offset": ("INT", {"default": 1, "min": 0, "max": 99,
+                                          "tooltip": "Position of first broken frame relative to end of start frames (1 = first frame after overlap)"}),
+                "num_replace": ("INT", {"default": 1, "min": 1, "max": 99,
+                                         "tooltip": "Number of consecutive frames to replace"}),
+            },
+            "hidden": {
+                "iteration": "INT",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "BOOLEAN", "INT", "INT", "INT")
+    RETURN_NAMES = ("images", "frame_before", "frame_after", "enabled", "num_start_frames", "frame_offset", "num_replace")
+    FUNCTION = "extract"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def extract(self, images, enabled=True, num_start_frames=1, frame_offset=1, num_replace=1, iteration=0):
+        if not enabled or iteration == 0:
+            return (images, images[:1], images[:1], enabled, num_start_frames, frame_offset, num_replace)
+
+        total = images.shape[0]
+        target_start = num_start_frames + frame_offset - 1
+        target_end = target_start + num_replace  # exclusive
+
+        if target_start < 1 or target_end >= total:
+            return (images, images[:1], images[-1:], enabled, num_start_frames, frame_offset, num_replace)
+
+        frame_before = images[target_start - 1:target_start]  # (1, H, W, C)
+        frame_after = images[target_end:target_end + 1]        # (1, H, W, C)
+
+        return (images, frame_before, frame_after, enabled, num_start_frames, frame_offset, num_replace)
+
+
+class BoundaryFrameSplicer:
+    """Splices interpolated frames back into the original batch, replacing the broken region.
+
+    On iteration 0: passes images through unchanged.
+    On iteration 1+: replaces the broken frames with the interpolated ones.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "interpolated_frames": ("IMAGE",),
+            },
+            "optional": {
+                "enabled": ("BOOLEAN", {"default": True}),
+                "num_start_frames": ("INT", {"default": 1, "min": 1, "max": 99,
+                                              "tooltip": "Must match BoundaryFrameExtractor"}),
+                "frame_offset": ("INT", {"default": 1, "min": 0, "max": 99,
+                                          "tooltip": "Must match BoundaryFrameExtractor"}),
+                "num_replace": ("INT", {"default": 1, "min": 1, "max": 99,
+                                         "tooltip": "Must match BoundaryFrameExtractor"}),
+            },
+            "hidden": {
+                "iteration": "INT",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "splice"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def splice(self, images, interpolated_frames, enabled=True, num_start_frames=1,
+               frame_offset=1, num_replace=1, iteration=0):
+        if not enabled or iteration == 0:
+            return (images,)
+
+        total = images.shape[0]
+        target_start = num_start_frames + frame_offset - 1
+        target_end = target_start + num_replace
+
+        if target_start < 1 or target_end > total:
+            return (images,)
+
+        # Interpolation nodes typically include the boundary pair in the output:
+        # [frame_before, interp1, ..., interpN, frame_after]
+        # Strip the first and last frames to get only the interpolated middles.
+        n_interp = interpolated_frames.shape[0]
+        if n_interp > 2:
+            inner = interpolated_frames[1:-1]
+        elif n_interp == 2:
+            # Only the two boundary frames came back, no actual interpolation —
+            # fall back to averaging them as a single replacement frame
+            inner = (interpolated_frames[:1] + interpolated_frames[1:]) / 2.0
+        else:
+            # Single frame returned — use it directly
+            inner = interpolated_frames
+
+        result = images.clone()
+        n_to_splice = min(inner.shape[0], num_replace)
+        result[target_start:target_start + n_to_splice] = inner[:n_to_splice]
+
+        return (result,)
+
+
 NODE_CLASS_MAPPINGS = {
     "IterVideoRouter": IterVideoRouter,
     "IterationSwitch": IterationSwitch,
     "ControlImageSlicer": ControlImageSlicer,
     "FrameAccumulator": FrameAccumulator,
+    "BoundaryFrameExtractor": BoundaryFrameExtractor,
+    "BoundaryFrameSplicer": BoundaryFrameSplicer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -406,4 +525,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IterationSwitch": "Iteration Switch",
     "ControlImageSlicer": "Control Image Slicer",
     "FrameAccumulator": "Frame Accumulator",
+    "BoundaryFrameExtractor": "Boundary Frame Extractor",
+    "BoundaryFrameSplicer": "Boundary Frame Splicer",
 }
