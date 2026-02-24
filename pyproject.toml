@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-mickmumpitz-nodes"
 description = "A collection of custom nodes for ComfyUI by Mickmumpitz"
-version = "1.0.4"
+version = "1.0.5"
 license = {file = "LICENSE"}
 dependencies = ["numpy>=1.21.0", "Pillow>=9.0.0", "opencv-python>=4.5.0"]
 

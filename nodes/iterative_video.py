@@ -427,6 +427,7 @@ class BoundaryFrameExtractor:
     RETURN_NAMES = ("images", "frame_before", "frame_after", "enabled", "num_start_frames", "frame_offset", "num_replace")
     FUNCTION = "extract"
     CATEGORY = "Mickmumpitz/video/iteration"
+    DESCRIPTION = "Extracts the two boundary frames surrounding a broken region in a video batch for external interpolation (RIFE, FILM, etc.). On iteration 0 the images pass through unchanged. On iteration 1+ the node outputs the frame immediately before and the frame immediately after the broken region so an interpolation node can generate replacements. Connect the outputs to BoundaryFrameSplicer to splice the interpolated frames back in."
 
     def extract(self, images, enabled=True, num_start_frames=1, frame_offset=1, num_replace=1, iteration=0):
         if not enabled or iteration == 0:
@@ -477,6 +478,7 @@ class BoundaryFrameSplicer:
     RETURN_NAMES = ("images",)
     FUNCTION = "splice"
     CATEGORY = "Mickmumpitz/video/iteration"
+    DESCRIPTION = "Splices interpolated frames back into the original video batch, replacing the broken region. Pair with BoundaryFrameExtractor. Automatically strips the boundary pair that most interpolation nodes include in their output, keeping only the interpolated middle frames. On iteration 0 images pass through unchanged. The num_start_frames, frame_offset, and num_replace values must match the connected BoundaryFrameExtractor."
 
     def splice(self, images, interpolated_frames, enabled=True, num_start_frames=1,
                frame_offset=1, num_replace=1, iteration=0):
