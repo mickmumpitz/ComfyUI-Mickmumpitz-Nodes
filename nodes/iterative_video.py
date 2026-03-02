@@ -21,7 +21,7 @@ _ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
 
 
 # Iter node class names whose "iteration" input should be overridden
-_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer"}
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer"}
 
 
 def _on_prompt_handler(json_data):
@@ -277,6 +277,102 @@ class ControlImageSlicer:
             return (available, False)
 
 
+class MultiChannelSlicer:
+    """Slices control images, plate, and mask batches for the current iteration."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "control_images": ("IMAGE",),
+                "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
+            },
+            "optional": {
+                "plate": ("IMAGE",),
+                "mask": ("MASK",),
+                "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 999}),
+                "extend_mode": (["none", "repeat_last", "loop"],),
+            },
+            "hidden": {
+                "iteration": "INT",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "BOOLEAN")
+    RETURN_NAMES = ("control_slice", "plate_slice", "mask_slice", "has_frames")
+    FUNCTION = "slice"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def _slice_batch(self, batch, frames_per_iteration, start, end, total, extend_mode):
+        """Slice a single batch tensor using the computed start/end indices."""
+        if start >= total:
+            if extend_mode == "loop":
+                indices = [i % total for i in range(start, end)]
+                return batch[indices]
+            elif extend_mode == "repeat_last":
+                last = batch[-1:]
+                return last.repeat(frames_per_iteration, *([1] * (batch.dim() - 1)))
+            else:
+                return batch[-1:]
+
+        if end <= total:
+            return batch[start:end]
+
+        available = batch[start:total]
+        if extend_mode == "repeat_last":
+            pad_count = end - total
+            last = batch[-1:]
+            padding = last.repeat(pad_count, *([1] * (batch.dim() - 1)))
+            return torch.cat([available, padding], dim=0)
+        elif extend_mode == "loop":
+            needed = end - total
+            indices = [i % total for i in range(needed)]
+            padding = batch[indices]
+            return torch.cat([available, padding], dim=0)
+        else:
+            return available
+
+    def slice(self, control_images, frames_per_iteration, iteration=0,
+              plate=None, mask=None, overlap_frames=0, extend_mode="none"):
+        total = control_images.shape[0]
+
+        if overlap_frames > 0:
+            start = iteration * (frames_per_iteration - overlap_frames)
+        else:
+            start = iteration * frames_per_iteration
+        end = start + frames_per_iteration
+
+        has_frames = start < total
+
+        # Slice control images
+        control_slice = self._slice_batch(control_images, frames_per_iteration, start, end, total, extend_mode)
+
+        # Slice plate
+        if plate is not None:
+            plate_total = plate.shape[0]
+            plate_slice = self._slice_batch(plate, frames_per_iteration, start, end, plate_total, extend_mode)
+        else:
+            plate_slice = control_slice
+
+        # Slice mask
+        if mask is not None:
+            mask_total = mask.shape[0]
+            mask_slice = self._slice_batch(mask, frames_per_iteration, start, end, mask_total, extend_mode)
+        else:
+            # Return an empty mask matching the control slice spatial dims
+            if control_slice.dim() == 4:
+                mask_slice = torch.zeros(control_slice.shape[0], control_slice.shape[1], control_slice.shape[2])
+            else:
+                mask_slice = torch.zeros(1, 1, 1)
+
+        # Adjust has_frames for extend modes
+        if not has_frames and extend_mode in ("loop", "repeat_last"):
+            if extend_mode == "loop":
+                has_frames = True
+
+        return (control_slice, plate_slice, mask_slice, has_frames)
+
+
 class FrameAccumulator:
     """Accumulates frames across iterations and controls the re-queue loop."""
 
@@ -517,6 +613,7 @@ NODE_CLASS_MAPPINGS = {
     "IterVideoRouter": IterVideoRouter,
     "IterationSwitch": IterationSwitch,
     "ControlImageSlicer": ControlImageSlicer,
+    "MultiChannelSlicer": MultiChannelSlicer,
     "FrameAccumulator": FrameAccumulator,
     "BoundaryFrameExtractor": BoundaryFrameExtractor,
     "BoundaryFrameSplicer": BoundaryFrameSplicer,
@@ -526,6 +623,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IterVideoRouter": "Iter Video Router",
     "IterationSwitch": "Iteration Switch",
     "ControlImageSlicer": "Control Image Slicer",
+    "MultiChannelSlicer": "Multi Channel Slicer",
     "FrameAccumulator": "Frame Accumulator",
     "BoundaryFrameExtractor": "Boundary Frame Extractor",
     "BoundaryFrameSplicer": "Boundary Frame Splicer",
