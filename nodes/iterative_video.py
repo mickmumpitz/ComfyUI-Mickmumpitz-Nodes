@@ -162,12 +162,14 @@ class IterVideoRouter:
             else:
                 start_frames = buffer[-num_start_frames:]
 
-            return (start_frames.to(start_image.device), num_start_frames)
+            device = start_image.device if start_image is not None else start_frames.device
+            return (start_frames.to(device), num_start_frames)
 
         # Fallback: load single frame from disk
         if previous_frame_path and os.path.isfile(previous_frame_path):
             loaded = load_image_as_tensor(previous_frame_path)
-            return (loaded.to(start_image.device), num_start_frames)
+            device = start_image.device if start_image is not None else loaded.device
+            return (loaded.to(device), num_start_frames)
 
         return (start_image, num_start_frames)
 
