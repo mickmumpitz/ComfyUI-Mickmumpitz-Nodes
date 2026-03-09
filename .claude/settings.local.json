@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep -l \"class.*VIDEO\\\\|def.*VIDEO\\\\|VIDEO.*=\")"
+    ]
+  }
+}
