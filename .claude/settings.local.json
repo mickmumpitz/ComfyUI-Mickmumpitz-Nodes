@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(xargs grep -l \"class.*VIDEO\\\\|def.*VIDEO\\\\|VIDEO.*=\")"
+      "Bash(xargs grep -l \"class.*VIDEO\\\\|def.*VIDEO\\\\|VIDEO.*=\")",
+      "Bash(find /d/comfy/ComfyUI -type f -name \"*.py\" | xargs grep -l \"PromptQueue\\\\|prompt_queue\" | head -10)",
+      "Bash(find /d/comfy/ComfyUI -type f -name \"*.py\" | xargs grep -l \"class PromptQueue\" 2>/dev/null)"
     ]
   }
 }
