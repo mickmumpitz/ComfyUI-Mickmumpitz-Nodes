@@ -21,7 +21,7 @@ _ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
 
 
 # Iter node class names whose "iteration" input should be overridden
-_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer"}
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer", "IterStringSelector"}
 
 
 def _on_prompt_handler(json_data):
@@ -201,6 +201,46 @@ class IterationSwitch:
         return (processed,)
 
 
+class IterStringSelector:
+    """Selects a string from a STRING_PACK based on the current iteration.
+
+    Falls back to the last non-empty string if the current iteration's
+    string is empty or out of range.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string_pack": ("STRING_PACK",),
+            },
+            "hidden": {
+                "iteration": "INT",
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "select"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def select(self, string_pack, iteration=0):
+        return (_select_iter_string(string_pack, iteration),)
+
+
+def _select_iter_string(string_pack, iteration):
+    """Select a string from a pack by iteration, falling back to last non-empty."""
+    if not string_pack:
+        return ""
+    last_nonempty = ""
+    for i in range(len(string_pack)):
+        if string_pack[i].strip():
+            last_nonempty = string_pack[i]
+        if i == iteration:
+            break
+    return last_nonempty
+
+
 class ControlImageSlicer:
     """Slices the full control image batch for the current iteration."""
 
@@ -212,6 +252,7 @@ class ControlImageSlicer:
                 "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
             },
             "optional": {
+                "string_pack": ("STRING_PACK",),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 999}),
                 "extend_mode": (["none", "repeat_last", "loop"],),
             },
@@ -220,14 +261,17 @@ class ControlImageSlicer:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "BOOLEAN")
-    RETURN_NAMES = ("control_slice", "has_frames")
+    RETURN_TYPES = ("IMAGE", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("control_slice", "has_frames", "string")
     FUNCTION = "slice"
     CATEGORY = "Mickmumpitz/video/iteration"
 
     def slice(self, control_images, frames_per_iteration, iteration=0,
-              overlap_frames=0, extend_mode="none"):
+              string_pack=None, overlap_frames=0, extend_mode="none"):
         total = control_images.shape[0]
+
+        # Select string for this iteration (fallback to last non-empty)
+        selected_string = _select_iter_string(string_pack, iteration)
 
         if overlap_frames > 0:
             start = iteration * (frames_per_iteration - overlap_frames)
@@ -244,20 +288,20 @@ class ControlImageSlicer:
                 # Wrap around
                 indices = [i % total for i in range(start, end)]
                 sliced = control_images[indices]
-                return (sliced, True)
+                return (sliced, True, selected_string)
             elif extend_mode == "repeat_last":
                 # Return frames_per_iteration copies of the last frame
                 last = control_images[-1:]
                 sliced = last.repeat(frames_per_iteration, 1, 1, 1)
-                return (sliced, False)
+                return (sliced, False, selected_string)
             else:
                 # "none" - return just the last frame as a minimal batch
-                return (control_images[-1:], False)
+                return (control_images[-1:], False, selected_string)
 
         if end <= total:
             # Full slice available
             sliced = control_images[start:end]
-            return (sliced, True)
+            return (sliced, True, selected_string)
 
         # Partial frames available
         available = control_images[start:total]
@@ -267,16 +311,16 @@ class ControlImageSlicer:
             last = control_images[-1:]
             padding = last.repeat(pad_count, 1, 1, 1)
             sliced = torch.cat([available, padding], dim=0)
-            return (sliced, False)
+            return (sliced, False, selected_string)
         elif extend_mode == "loop":
             needed = end - total
             indices = [i % total for i in range(needed)]
             padding = control_images[indices]
             sliced = torch.cat([available, padding], dim=0)
-            return (sliced, False)
+            return (sliced, False, selected_string)
         else:
             # "none" - return short batch
-            return (available, False)
+            return (available, False, selected_string)
 
 
 class MultiChannelSlicer:
@@ -290,6 +334,7 @@ class MultiChannelSlicer:
                 "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
             },
             "optional": {
+                "string_pack": ("STRING_PACK",),
                 "plate": ("IMAGE",),
                 "mask": ("MASK",),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 999}),
@@ -300,8 +345,8 @@ class MultiChannelSlicer:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "BOOLEAN")
-    RETURN_NAMES = ("control_slice", "plate_slice", "mask_slice", "has_frames")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("control_slice", "plate_slice", "mask_slice", "has_frames", "string")
     FUNCTION = "slice"
     CATEGORY = "Mickmumpitz/video/iteration"
 
@@ -335,8 +380,11 @@ class MultiChannelSlicer:
             return available
 
     def slice(self, control_images, frames_per_iteration, iteration=0,
-              plate=None, mask=None, overlap_frames=0, extend_mode="none"):
+              string_pack=None, plate=None, mask=None, overlap_frames=0, extend_mode="none"):
         total = control_images.shape[0]
+
+        # Select string for this iteration (fallback to last non-empty)
+        selected_string = _select_iter_string(string_pack, iteration)
 
         if overlap_frames > 0:
             start = iteration * (frames_per_iteration - overlap_frames)
@@ -372,7 +420,7 @@ class MultiChannelSlicer:
             if extend_mode == "loop":
                 has_frames = True
 
-        return (control_slice, plate_slice, mask_slice, has_frames)
+        return (control_slice, plate_slice, mask_slice, has_frames, selected_string)
 
 
 class FrameAccumulator:
@@ -619,6 +667,7 @@ NODE_CLASS_MAPPINGS = {
     "FrameAccumulator": FrameAccumulator,
     "BoundaryFrameExtractor": BoundaryFrameExtractor,
     "BoundaryFrameSplicer": BoundaryFrameSplicer,
+    "IterStringSelector": IterStringSelector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -629,4 +678,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FrameAccumulator": "Frame Accumulator",
     "BoundaryFrameExtractor": "Boundary Frame Extractor",
     "BoundaryFrameSplicer": "Boundary Frame Splicer",
+    "IterStringSelector": "Iter String Selector",
 }
