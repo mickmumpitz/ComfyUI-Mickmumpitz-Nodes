@@ -228,6 +228,52 @@ class IterStringSelector:
         return (_select_iter_string(string_pack, iteration),)
 
 
+class IterPromptBuilder:
+    """Packs per-iteration prompts and extracts preview frames from the input video.
+
+    Outputs a STRING_PACK plus an IMAGE batch of the frames where each
+    iteration's new content starts (one frame per field).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for i in range(1, 25):
+            optional[f"string_{i}"] = ("STRING", {"multiline": True, "default": ""})
+        return {
+            "required": {
+                "input_video": ("IMAGE",),
+                "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
+                "num_start_frames": ("INT", {"default": 1, "min": 0, "max": 999}),
+                "num_fields": ("INT", {"default": 4, "min": 1, "max": 24, "step": 1}),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("STRING_PACK", "IMAGE")
+    RETURN_NAMES = ("string_pack", "iteration_start_frames")
+    FUNCTION = "build"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def build(self, input_video, frames_per_iteration, num_start_frames,
+              num_fields, **kwargs):
+        strings = []
+        for i in range(1, num_fields + 1):
+            strings.append(kwargs.get(f"string_{i}", ""))
+
+        # Extract the frame where each iteration's new content begins
+        step = max(1, frames_per_iteration - num_start_frames)
+        total_frames = input_video.shape[0]
+
+        indices = []
+        for i in range(num_fields):
+            indices.append(min(i * step, total_frames - 1))
+
+        preview_frames = input_video[indices]
+
+        return (tuple(strings), preview_frames)
+
+
 def _select_iter_string(string_pack, iteration):
     """Select a string from a pack by iteration, falling back to last non-empty."""
     if not string_pack:
@@ -668,6 +714,7 @@ NODE_CLASS_MAPPINGS = {
     "BoundaryFrameExtractor": BoundaryFrameExtractor,
     "BoundaryFrameSplicer": BoundaryFrameSplicer,
     "IterStringSelector": IterStringSelector,
+    "IterPromptBuilder": IterPromptBuilder,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -679,4 +726,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BoundaryFrameExtractor": "Boundary Frame Extractor",
     "BoundaryFrameSplicer": "Boundary Frame Splicer",
     "IterStringSelector": "Iter String Selector",
+    "IterPromptBuilder": "Iter Prompt Builder",
 }

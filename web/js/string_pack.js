@@ -20,6 +20,18 @@ app.registerExtension({
     },
 });
 
+/**
+ * Resize the node to fit its computed size, but never shrink the width.
+ * Uses requestAnimationFrame so the DOM has laid out first.
+ */
+function safeResize(node) {
+    requestAnimationFrame(() => {
+        const sz = node.computeSize();
+        sz[0] = Math.max(sz[0], node.size[0]);
+        node.setSize(sz);
+    });
+}
+
 function setupStringPackVisibility(node) {
     const numFieldsWidget = node.widgets.find(w => w.name === "num_fields");
     if (!numFieldsWidget) return;
@@ -30,7 +42,7 @@ function setupStringPackVisibility(node) {
             const w = node.widgets.find(w => w.name === `string_${i}`);
             if (w) w.hidden = i > n;
         }
-        node.setSize(node.computeSize());
+        safeResize(node);
     };
 
     const originalCallback = numFieldsWidget.callback;
@@ -51,7 +63,7 @@ function applyStringPackVisibility(node) {
         const w = node.widgets.find(w => w.name === `string_${i}`);
         if (w) w.hidden = i > n;
     }
-    node.setSize(node.computeSize());
+    safeResize(node);
 }
 
 function setupPromptStitcherOutputs(node) {
@@ -67,7 +79,7 @@ function setupPromptStitcherOutputs(node) {
             const idx = node.outputs.length;
             node.addOutput(`prompt_${idx + 1}`, "STRING");
         }
-        node.setSize(node.computeSize());
+        safeResize(node);
     };
 
     const originalCallback = numOutputsWidget.callback;
@@ -91,5 +103,5 @@ function applyPromptStitcherOutputs(node) {
         const idx = node.outputs.length;
         node.addOutput(`prompt_${idx + 1}`, "STRING");
     }
-    node.setSize(node.computeSize());
+    safeResize(node);
 }
