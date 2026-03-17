@@ -2,6 +2,14 @@
 
 A collection of custom nodes for ComfyUI by Mickmumpitz.
 
+## Node Categories
+
+- **Iterative Video** — Nodes for multi-iteration video generation with frame accumulation, routing, and resume support
+- **Video Context** — Context image and control frame extraction for video workflows
+- **Video Utilities** — Video concatenation and related tools
+- **String Batch** — Story/style selectors and string batch processing
+- **Utilities** — Resolution pickers, preprocessing settings, execution gates, and other helper nodes
+
 ## Installation
 
 ### Via ComfyUI Manager (Recommended)
