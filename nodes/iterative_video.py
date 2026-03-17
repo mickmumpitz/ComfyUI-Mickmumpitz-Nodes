@@ -202,7 +202,7 @@ class IterationSwitch:
 
 
 class IterStringSelector:
-    """Selects a string from a STRING_PACK based on the current iteration.
+    """Selects a string from a STRING_BATCH based on the current iteration.
 
     Falls back to the last non-empty string if the current iteration's
     string is empty or out of range.
@@ -212,7 +212,7 @@ class IterStringSelector:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "string_pack": ("STRING_PACK",),
+                "string_batch": ("STRING_BATCH",),
             },
             "hidden": {
                 "iteration": "INT",
@@ -224,14 +224,45 @@ class IterStringSelector:
     FUNCTION = "select"
     CATEGORY = "Mickmumpitz/video/iteration"
 
-    def select(self, string_pack, iteration=0):
-        return (_select_iter_string(string_pack, iteration),)
+    def select(self, string_batch, iteration=0):
+        return (_select_iter_string(string_batch, iteration),)
+
+
+class IterSeedBatch:
+    """Batches multiple seeds into a SEED_BATCH for per-iteration seed control.
+
+    Seeds set to -1 are treated as unset — the slicers will fall back to the
+    last valid (>= 0) seed from a previous iteration.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {}
+        for i in range(1, 25):
+            optional[f"seed_{i}"] = ("INT", {"default": -1, "min": -1, "max": 0xFFFFFFFFFFFFFFFF})
+        return {
+            "required": {
+                "num_fields": ("INT", {"default": 4, "min": 1, "max": 24, "step": 1}),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("SEED_BATCH",)
+    RETURN_NAMES = ("seed_batch",)
+    FUNCTION = "batch"
+    CATEGORY = "Mickmumpitz/video/iteration"
+
+    def batch(self, num_fields, **kwargs):
+        seeds = []
+        for i in range(1, num_fields + 1):
+            seeds.append(kwargs.get(f"seed_{i}", -1))
+        return (tuple(seeds),)
 
 
 class IterPromptBuilder:
-    """Packs per-iteration prompts and extracts preview frames from the input video.
+    """Batches per-iteration prompts and extracts preview frames from the input video.
 
-    Outputs a STRING_PACK plus an IMAGE batch of the frames where each
+    Outputs a STRING_BATCH plus an IMAGE batch of the frames where each
     iteration's new content starts (one frame per field).
     """
 
@@ -250,8 +281,8 @@ class IterPromptBuilder:
             "optional": optional,
         }
 
-    RETURN_TYPES = ("STRING_PACK", "IMAGE")
-    RETURN_NAMES = ("string_pack", "iteration_start_frames")
+    RETURN_TYPES = ("STRING_BATCH", "IMAGE")
+    RETURN_NAMES = ("string_batch", "iteration_start_frames")
     FUNCTION = "build"
     CATEGORY = "Mickmumpitz/video/iteration"
 
@@ -274,17 +305,30 @@ class IterPromptBuilder:
         return (tuple(strings), preview_frames)
 
 
-def _select_iter_string(string_pack, iteration):
-    """Select a string from a pack by iteration, falling back to last non-empty."""
-    if not string_pack:
+def _select_iter_string(string_batch, iteration):
+    """Select a string from a batch by iteration, falling back to last non-empty."""
+    if not string_batch:
         return ""
     last_nonempty = ""
-    for i in range(len(string_pack)):
-        if string_pack[i].strip():
-            last_nonempty = string_pack[i]
+    for i in range(len(string_batch)):
+        if string_batch[i].strip():
+            last_nonempty = string_batch[i]
         if i == iteration:
             break
     return last_nonempty
+
+
+def _select_iter_seed(seed_batch, iteration):
+    """Select a seed from a batch by iteration, falling back to last valid (>= 0)."""
+    if not seed_batch:
+        return 0
+    last_valid = 0
+    for i in range(len(seed_batch)):
+        if seed_batch[i] >= 0:
+            last_valid = seed_batch[i]
+        if i == iteration:
+            break
+    return last_valid
 
 
 class ControlImageSlicer:
@@ -298,7 +342,8 @@ class ControlImageSlicer:
                 "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
             },
             "optional": {
-                "string_pack": ("STRING_PACK",),
+                "string_batch": ("STRING_BATCH",),
+                "seed_batch": ("SEED_BATCH",),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 999}),
                 "extend_mode": (["none", "repeat_last", "loop"],),
             },
@@ -307,17 +352,18 @@ class ControlImageSlicer:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "BOOLEAN", "STRING")
-    RETURN_NAMES = ("control_slice", "has_frames", "string")
+    RETURN_TYPES = ("IMAGE", "BOOLEAN", "STRING", "INT")
+    RETURN_NAMES = ("control_slice", "has_frames", "string", "seed")
     FUNCTION = "slice"
     CATEGORY = "Mickmumpitz/video/iteration"
 
     def slice(self, control_images, frames_per_iteration, iteration=0,
-              string_pack=None, overlap_frames=0, extend_mode="none"):
+              string_batch=None, seed_batch=None, overlap_frames=0, extend_mode="none"):
         total = control_images.shape[0]
 
-        # Select string for this iteration (fallback to last non-empty)
-        selected_string = _select_iter_string(string_pack, iteration)
+        # Select string/seed for this iteration (fallback to last valid)
+        selected_string = _select_iter_string(string_batch, iteration)
+        selected_seed = _select_iter_seed(seed_batch, iteration)
 
         if overlap_frames > 0:
             start = iteration * (frames_per_iteration - overlap_frames)
@@ -334,20 +380,20 @@ class ControlImageSlicer:
                 # Wrap around
                 indices = [i % total for i in range(start, end)]
                 sliced = control_images[indices]
-                return (sliced, True, selected_string)
+                return (sliced, True, selected_string, selected_seed)
             elif extend_mode == "repeat_last":
                 # Return frames_per_iteration copies of the last frame
                 last = control_images[-1:]
                 sliced = last.repeat(frames_per_iteration, 1, 1, 1)
-                return (sliced, False, selected_string)
+                return (sliced, False, selected_string, selected_seed)
             else:
                 # "none" - return just the last frame as a minimal batch
-                return (control_images[-1:], False, selected_string)
+                return (control_images[-1:], False, selected_string, selected_seed)
 
         if end <= total:
             # Full slice available
             sliced = control_images[start:end]
-            return (sliced, True, selected_string)
+            return (sliced, True, selected_string, selected_seed)
 
         # Partial frames available
         available = control_images[start:total]
@@ -357,16 +403,16 @@ class ControlImageSlicer:
             last = control_images[-1:]
             padding = last.repeat(pad_count, 1, 1, 1)
             sliced = torch.cat([available, padding], dim=0)
-            return (sliced, False, selected_string)
+            return (sliced, False, selected_string, selected_seed)
         elif extend_mode == "loop":
             needed = end - total
             indices = [i % total for i in range(needed)]
             padding = control_images[indices]
             sliced = torch.cat([available, padding], dim=0)
-            return (sliced, False, selected_string)
+            return (sliced, False, selected_string, selected_seed)
         else:
             # "none" - return short batch
-            return (available, False, selected_string)
+            return (available, False, selected_string, selected_seed)
 
 
 class MultiChannelSlicer:
@@ -380,7 +426,8 @@ class MultiChannelSlicer:
                 "frames_per_iteration": ("INT", {"default": 81, "min": 1, "max": 9999}),
             },
             "optional": {
-                "string_pack": ("STRING_PACK",),
+                "string_batch": ("STRING_BATCH",),
+                "seed_batch": ("SEED_BATCH",),
                 "plate": ("IMAGE",),
                 "mask": ("MASK",),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 999}),
@@ -391,8 +438,8 @@ class MultiChannelSlicer:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "BOOLEAN", "STRING")
-    RETURN_NAMES = ("control_slice", "plate_slice", "mask_slice", "has_frames", "string")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "BOOLEAN", "STRING", "INT")
+    RETURN_NAMES = ("control_slice", "plate_slice", "mask_slice", "has_frames", "string", "seed")
     FUNCTION = "slice"
     CATEGORY = "Mickmumpitz/video/iteration"
 
@@ -426,11 +473,13 @@ class MultiChannelSlicer:
             return available
 
     def slice(self, control_images, frames_per_iteration, iteration=0,
-              string_pack=None, plate=None, mask=None, overlap_frames=0, extend_mode="none"):
+              string_batch=None, seed_batch=None, plate=None, mask=None,
+              overlap_frames=0, extend_mode="none"):
         total = control_images.shape[0]
 
-        # Select string for this iteration (fallback to last non-empty)
-        selected_string = _select_iter_string(string_pack, iteration)
+        # Select string/seed for this iteration (fallback to last valid)
+        selected_string = _select_iter_string(string_batch, iteration)
+        selected_seed = _select_iter_seed(seed_batch, iteration)
 
         if overlap_frames > 0:
             start = iteration * (frames_per_iteration - overlap_frames)
@@ -466,7 +515,7 @@ class MultiChannelSlicer:
             if extend_mode == "loop":
                 has_frames = True
 
-        return (control_slice, plate_slice, mask_slice, has_frames, selected_string)
+        return (control_slice, plate_slice, mask_slice, has_frames, selected_string, selected_seed)
 
 
 class FrameAccumulator:
@@ -715,6 +764,7 @@ NODE_CLASS_MAPPINGS = {
     "BoundaryFrameSplicer": BoundaryFrameSplicer,
     "IterStringSelector": IterStringSelector,
     "IterPromptBuilder": IterPromptBuilder,
+    "IterSeedBatch": IterSeedBatch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -727,4 +777,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BoundaryFrameSplicer": "Boundary Frame Splicer",
     "IterStringSelector": "Iter String Selector",
     "IterPromptBuilder": "Iter Prompt Builder",
+    "IterSeedBatch": "Iter Seed Batch",
 }

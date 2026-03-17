@@ -1,19 +1,19 @@
 import { app } from "../../../scripts/app.js";
 
 app.registerExtension({
-    name: "Mickmumpitz.StringPack",
+    name: "Mickmumpitz.StringBatch",
 
     nodeCreated(node) {
-        if (node.comfyClass === "StringPack") {
-            setupStringPackVisibility(node);
+        if (node.comfyClass === "StringBatch") {
+            setupStringBatchVisibility(node);
         } else if (node.comfyClass === "PromptStitcher") {
             setupPromptStitcherOutputs(node);
         }
     },
 
     async loadedGraphNode(node) {
-        if (node.comfyClass === "StringPack") {
-            applyStringPackVisibility(node);
+        if (node.comfyClass === "StringBatch") {
+            applyStringBatchVisibility(node);
         } else if (node.comfyClass === "PromptStitcher") {
             applyPromptStitcherOutputs(node);
         }
@@ -32,7 +32,7 @@ function safeResize(node) {
     });
 }
 
-function setupStringPackVisibility(node) {
+function setupStringBatchVisibility(node) {
     const numFieldsWidget = node.widgets.find(w => w.name === "num_fields");
     if (!numFieldsWidget) return;
 
@@ -54,7 +54,7 @@ function setupStringPackVisibility(node) {
     updateVisibility();
 }
 
-function applyStringPackVisibility(node) {
+function applyStringBatchVisibility(node) {
     const numFieldsWidget = node.widgets?.find(w => w.name === "num_fields");
     if (!numFieldsWidget) return;
 

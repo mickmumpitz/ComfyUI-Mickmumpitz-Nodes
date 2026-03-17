@@ -1,5 +1,5 @@
-class StringPack:
-    """Pack multiple strings into a STRING_PACK for batch prompt workflows."""
+class StringBatch:
+    """Batch multiple strings into a STRING_BATCH for multi-prompt workflows."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -13,26 +13,26 @@ class StringPack:
             "optional": optional,
         }
 
-    RETURN_TYPES = ("STRING_PACK",)
-    RETURN_NAMES = ("string_pack",)
-    FUNCTION = "pack"
-    CATEGORY = "Mickmumpitz/String Pack"
+    RETURN_TYPES = ("STRING_BATCH",)
+    RETURN_NAMES = ("string_batch",)
+    FUNCTION = "batch"
+    CATEGORY = "Mickmumpitz/String Batch"
 
-    def pack(self, num_fields, **kwargs):
+    def batch(self, num_fields, **kwargs):
         strings = []
         for i in range(1, num_fields + 1):
             strings.append(kwargs.get(f"string_{i}", ""))
         return (tuple(strings),)
 
 
-class PackSelector:
-    """Select one STRING_PACK from up to 5 inputs."""
+class BatchSelector:
+    """Select one STRING_BATCH from up to 5 inputs."""
 
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
         for i in range(1, 6):
-            optional[f"pack_{i}"] = ("STRING_PACK",)
+            optional[f"batch_{i}"] = ("STRING_BATCH",)
         return {
             "required": {
                 "select": ("INT", {"default": 1, "min": 1, "max": 5, "step": 1}),
@@ -40,26 +40,26 @@ class PackSelector:
             "optional": optional,
         }
 
-    RETURN_TYPES = ("STRING_PACK",)
-    RETURN_NAMES = ("string_pack",)
-    FUNCTION = "select_pack"
-    CATEGORY = "Mickmumpitz/String Pack"
+    RETURN_TYPES = ("STRING_BATCH",)
+    RETURN_NAMES = ("string_batch",)
+    FUNCTION = "select_batch"
+    CATEGORY = "Mickmumpitz/String Batch"
 
-    def select_pack(self, select, **kwargs):
-        pack = kwargs.get(f"pack_{select}")
-        if pack is None:
+    def select_batch(self, select, **kwargs):
+        batch = kwargs.get(f"batch_{select}")
+        if batch is None:
             return (("",),)
-        return (pack,)
+        return (batch,)
 
 
 class StringSelector:
-    """Select a single string from a STRING_PACK by index."""
+    """Select a single string from a STRING_BATCH by index."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "string_pack": ("STRING_PACK",),
+                "string_batch": ("STRING_BATCH",),
                 "select": ("INT", {"default": 1, "min": 1, "max": 24, "step": 1}),
             },
         }
@@ -67,21 +67,21 @@ class StringSelector:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("string",)
     FUNCTION = "select_string"
-    CATEGORY = "Mickmumpitz/String Pack"
+    CATEGORY = "Mickmumpitz/String Batch"
 
-    def select_string(self, string_pack, select):
-        index = max(0, min(select - 1, len(string_pack) - 1))
-        return (string_pack[index],)
+    def select_string(self, string_batch, select):
+        index = max(0, min(select - 1, len(string_batch) - 1))
+        return (string_batch[index],)
 
 
 class PromptStitcher:
-    """Stitch a style string onto each prompt in a STRING_PACK."""
+    """Stitch a style string onto each prompt in a STRING_BATCH."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "string_pack": ("STRING_PACK",),
+                "string_batch": ("STRING_BATCH",),
                 "style": ("STRING", {"multiline": True, "default": "", "forceInput": True}),
                 "separator": ("STRING", {"default": ", ", "multiline": False}),
                 "num_outputs": ("INT", {"default": 4, "min": 1, "max": 24, "step": 1}),
@@ -91,13 +91,13 @@ class PromptStitcher:
     RETURN_TYPES = ("STRING",) * 24
     RETURN_NAMES = tuple(f"prompt_{i}" for i in range(1, 25))
     FUNCTION = "stitch"
-    CATEGORY = "Mickmumpitz/String Pack"
+    CATEGORY = "Mickmumpitz/String Batch"
 
-    def stitch(self, string_pack, style, separator, num_outputs):
+    def stitch(self, string_batch, style, separator, num_outputs):
         results = []
         for i in range(24):
-            if i < len(string_pack) and i < num_outputs:
-                prompt = string_pack[i]
+            if i < len(string_batch) and i < num_outputs:
+                prompt = string_batch[i]
                 if style.strip():
                     prompt = prompt + separator + style
                 results.append(prompt)
@@ -107,15 +107,15 @@ class PromptStitcher:
 
 
 NODE_CLASS_MAPPINGS = {
-    "StringPack": StringPack,
-    "PackSelector": PackSelector,
+    "StringBatch": StringBatch,
+    "BatchSelector": BatchSelector,
     "StringSelector": StringSelector,
     "PromptStitcher": PromptStitcher,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "StringPack": "String Pack",
-    "PackSelector": "Pack Selector",
+    "StringBatch": "String Batch",
+    "BatchSelector": "Batch Selector",
     "StringSelector": "String Selector",
     "PromptStitcher": "Prompt Stitcher",
 }

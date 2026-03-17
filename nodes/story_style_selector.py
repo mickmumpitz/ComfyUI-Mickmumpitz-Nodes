@@ -17,7 +17,7 @@ class StoryStyleSelector:
     RETURN_TYPES = ("INT", "INT")
     RETURN_NAMES = ("story_index", "style_index")
     FUNCTION = "select"
-    CATEGORY = "Mickmumpitz/String Pack"
+    CATEGORY = "Mickmumpitz/String Batch"
 
     def select(self, story, style):
         story_index = STORY_OPTIONS.index(story) + 1
