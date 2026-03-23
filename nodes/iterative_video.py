@@ -27,7 +27,7 @@ _QUEUE_SNAPSHOT = None   # {"prompt": dict, "extra_data": dict, "outputs_to_exec
 
 
 # Iter node class names whose "iteration" input should be overridden
-_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer", "IterStringSelector"}
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer", "IterStringSelector", "ControlCrossfadeIterationFix"}
 
 
 def _compute_outputs_to_execute(prompt):

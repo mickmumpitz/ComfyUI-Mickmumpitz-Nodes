@@ -69,12 +69,9 @@ class ControlCrossfadeIterationFix:
             },
             "optional": {
                 "mask": ("MASK",),
-                "iteration_index": ("INT", {
-                    "default": 1,
-                    "min": 0,
-                    "max": 100,
-                    "tooltip": "Current iteration index. 0 = first iteration (passes through unchanged), 1+ = blend"
-                }),
+            },
+            "hidden": {
+                "iteration": "INT",
             }
         }
 
@@ -86,18 +83,17 @@ class ControlCrossfadeIterationFix:
 
     def apply_crossfade(self, start_frames, control_frames, num_start_frames,
                         blend_length, blend_curve, color_match,
-                        mask=None, iteration_index=1):
+                        mask=None, iteration=0):
         B, H, W, C = control_frames.shape
         device = control_frames.device
 
-        # Build default all-white mask output
         if mask is not None:
             mask_B = mask.shape[0]
         else:
             mask_B = 0
 
         # First iteration: pass through unchanged
-        if iteration_index == 0:
+        if iteration == 0:
             if mask is not None:
                 mask_out = mask
             else:
