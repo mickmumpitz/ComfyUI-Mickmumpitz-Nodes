@@ -3,141 +3,179 @@ Control Crossfade Node for ComfyUI
 ===================================
 Eliminates the "flash" at iteration boundaries in iterative Wan2.1 SkyReels workflows.
 
-Problem: When iteration N+1 starts, the first ~14 frames come from the previous iteration's
-generated output (start images). At frame 15, the control input hard-switches to the raw
-control video. Because the generated output has drifted in color/lighting from the original
-control footage, this abrupt switch creates a visible flash.
+Blending layout (0-indexed, num_start_frames=14, blend_length=8):
+  - Frames 0..5   → pure start_frames
+  - Frames 6..13  → cross-fade start_frames → control_frames
+  - Frames 14+    → pure control_frames
 
-Solution: This node creates a smooth cross-fade zone in the control images around the
-transition point. Instead of a hard cut, the control gradually blends from the previous
-iteration's generated frames to the actual control video over a configurable number of frames.
+Optional mask output follows the same zones:
+  - Frames 0..5   → black (0.0)
+  - Frames 6..13  → cross-fade black → mask
+  - Frames 14+    → mask as-is
 """
 
 import torch
 
 
+def _apply_curve(t, curve):
+    """Apply easing curve to a 0→1 linear ramp."""
+    if curve == "ease_in_out":
+        return t * t * (3.0 - 2.0 * t)
+    elif curve == "ease_in":
+        return t * t
+    elif curve == "ease_out":
+        return 1.0 - (1.0 - t) ** 2
+    return t  # linear
+
+
 class ControlCrossfadeIterationFix:
     """
-    Blends control images at iteration boundaries to prevent flash artifacts.
+    Blends start_frames into control_frames to prevent flash artifacts at
+    iteration boundaries.
 
-    For iteration N+1:
-      - Frames 0 to (num_start_frames - blend_length): use prev_gen_frames as control
-      - Frames (num_start_frames - blend_length) to (num_start_frames + blend_length): cross-fade
-      - Frames (num_start_frames + blend_length) onward: use raw control_frames
+    Zones (0-indexed):
+      [0, blend_start)             → pure start_frames
+      [blend_start, num_start_frames) → cross-fade
+      [num_start_frames, ...)       → pure control_frames
+
+    Where blend_start = num_start_frames - blend_length.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "start_frames": ("IMAGE",),
                 "control_frames": ("IMAGE",),
-                "prev_gen_frames": ("IMAGE",),
                 "num_start_frames": ("INT", {
                     "default": 14,
                     "min": 1,
                     "max": 100,
                     "step": 1,
-                    "tooltip": "Number of start/overlap frames from the previous iteration"
+                    "tooltip": "Frame index where control takes over fully (blend target)"
                 }),
                 "blend_length": ("INT", {
                     "default": 8,
-                    "min": 2,
+                    "min": 1,
                     "max": 40,
                     "step": 1,
-                    "tooltip": "Number of frames over which to cross-fade (centered on the switch point)"
+                    "tooltip": "Number of frames the cross-fade spans before num_start_frames"
                 }),
                 "blend_curve": (["linear", "ease_in_out", "ease_in", "ease_out"],),
                 "color_match": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Match color/brightness of control frames to prev_gen at the transition point"
+                    "tooltip": "Match color/brightness of control frames to start frames at the transition"
                 }),
             },
             "optional": {
+                "mask": ("MASK",),
                 "iteration_index": ("INT", {
-                    "default": -1,
-                    "min": -1,
+                    "default": 1,
+                    "min": 0,
                     "max": 100,
-                    "tooltip": "Current iteration index. Set to 0 or -1 to skip blending (first iteration needs no fix)"
+                    "tooltip": "Current iteration index. 0 = first iteration (passes through unchanged), 1+ = blend"
                 }),
             }
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("blended_control",)
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("blended_control", "blended_mask")
     FUNCTION = "apply_crossfade"
     CATEGORY = "image/transform"
-    DESCRIPTION = "Eliminates flash artifacts at iteration boundaries by cross-fading control images"
+    DESCRIPTION = "Eliminates flash artifacts at iteration boundaries by cross-fading start frames into control frames"
 
-    def apply_crossfade(self, control_frames, prev_gen_frames, num_start_frames,
-                        blend_length, blend_curve, color_match, iteration_index=-1):
-        # First iteration: no previous output to blend with, pass through unchanged
-        if iteration_index == 0 or iteration_index == -1:
-            return (control_frames,)
-
+    def apply_crossfade(self, start_frames, control_frames, num_start_frames,
+                        blend_length, blend_curve, color_match,
+                        mask=None, iteration_index=1):
         B, H, W, C = control_frames.shape
-        B_prev = prev_gen_frames.shape[0]
+        device = control_frames.device
 
-        # Clone control frames to avoid modifying the original
+        # Build default all-white mask output
+        if mask is not None:
+            mask_B = mask.shape[0]
+        else:
+            mask_B = 0
+
+        # First iteration: pass through unchanged
+        if iteration_index == 0:
+            if mask is not None:
+                mask_out = mask
+            else:
+                mask_out = torch.ones(B, H, W, device=device)
+            return (control_frames, mask_out)
+
+        # --- Zone boundaries (0-indexed) ---
+        blend_start = max(0, num_start_frames - blend_length)
+        blend_end = min(B, num_start_frames)  # exclusive
+        actual_blend = blend_end - blend_start
+
+        # --- Color matching offset ---
+        color_offset = torch.zeros(1, 1, 1, C, device=device)
+        if color_match and actual_blend > 0:
+            # Compare at the boundary where blending begins
+            ref_idx = min(blend_start, B - 1)
+            start_ref_idx = min(blend_start, start_frames.shape[0] - 1)
+            start_mean = start_frames[start_ref_idx].mean(dim=(0, 1), keepdim=True)
+            ctrl_mean = control_frames[ref_idx].mean(dim=(0, 1), keepdim=True)
+            color_offset = (start_mean - ctrl_mean).unsqueeze(0)  # (1,1,1,C)
+
+        # --- Blend weights for the transition zone ---
+        if actual_blend > 1:
+            t = torch.linspace(0.0, 1.0, actual_blend, device=device)
+            weights = _apply_curve(t, blend_curve)
+        elif actual_blend == 1:
+            weights = torch.tensor([1.0], device=device)
+        else:
+            weights = torch.zeros(0, device=device)
+
+        # --- Build image output ---
         result = control_frames.clone()
+        B_start = start_frames.shape[0]
 
-        # Calculate blend boundaries
-        half_blend = blend_length // 2
-        blend_start = max(0, num_start_frames - half_blend)
-        blend_end = min(B, num_start_frames + half_blend)
-        actual_blend_length = blend_end - blend_start
+        # Pure start zone
+        for i in range(min(blend_start, B)):
+            si = min(i, B_start - 1)
+            result[i] = start_frames[si]
 
-        if actual_blend_length < 2:
-            return (control_frames,)
-
-        # Optional: Color match the control frames to the previous generation
-        color_offset = torch.zeros(1, 1, 1, C, device=control_frames.device)
-        if color_match and B_prev > 0:
-            switch_idx = min(num_start_frames, B - 1)
-            prev_ref_idx = min(B_prev - 1, num_start_frames - 1)
-
-            prev_mean = prev_gen_frames[prev_ref_idx].mean(dim=(0, 1), keepdim=True)
-            ctrl_mean = control_frames[switch_idx].mean(dim=(0, 1), keepdim=True)
-            color_offset = (prev_mean - ctrl_mean).unsqueeze(0)
-
-        # Generate blend weights based on the chosen curve
-        t = torch.linspace(0.0, 1.0, actual_blend_length, device=control_frames.device)
-
-        if blend_curve == "ease_in_out":
-            weights = t * t * (3.0 - 2.0 * t)
-        elif blend_curve == "ease_in":
-            weights = t * t
-        elif blend_curve == "ease_out":
-            weights = 1.0 - (1.0 - t) ** 2
-        else:  # linear
-            weights = t
-
-        # weights: 0.0 = fully prev_gen, 1.0 = fully control
-        weights = weights.view(-1, 1, 1, 1)
-
-        # Apply the cross-fade in the blend zone
-        for i in range(actual_blend_length):
+        # Blend zone
+        for i in range(actual_blend):
             frame_idx = blend_start + i
             w = weights[i]
 
-            prev_idx = min(frame_idx, B_prev - 1)
-            prev_frame = prev_gen_frames[prev_idx]
-            ctrl_frame = control_frames[frame_idx]
+            si = min(frame_idx, B_start - 1)
+            s_frame = start_frames[si]
+            c_frame = control_frames[frame_idx]
 
+            # Color correction fades out as we approach pure control
             if color_match:
-                correction_strength = 1.0 - weights[i]
-                corrected_ctrl = ctrl_frame + (color_offset[0, 0] * correction_strength).squeeze(0)
-                corrected_ctrl = corrected_ctrl.clamp(0.0, 1.0)
-            else:
-                corrected_ctrl = ctrl_frame
+                correction = 1.0 - w
+                c_frame = (c_frame + color_offset[0, 0] * correction).clamp(0.0, 1.0)
 
-            result[frame_idx] = (1.0 - w) * prev_frame + w * corrected_ctrl
+            result[frame_idx] = (1.0 - w) * s_frame + w * c_frame
 
-        # For frames BEFORE the blend zone, replace control with prev_gen
-        for i in range(blend_start):
-            prev_idx = min(i, B_prev - 1)
-            result[i] = prev_gen_frames[prev_idx]
+        # Frames >= blend_end are already control_frames from the clone
 
-        return (result,)
+        # --- Build mask output ---
+        if mask is not None:
+            mask_out = torch.zeros(B, H, W, device=device)
+
+            # Pure start zone → black (already zeros)
+
+            # Blend zone: black → mask
+            for i in range(actual_blend):
+                frame_idx = blend_start + i
+                w = weights[i]
+                mi = min(frame_idx, mask_B - 1)
+                mask_out[frame_idx] = w * mask[mi]
+
+            # Pure control zone → mask as-is
+            for i in range(blend_end, B):
+                mi = min(i, mask_B - 1)
+                mask_out[i] = mask[mi]
+        else:
+            mask_out = torch.ones(B, H, W, device=device)
+
+        return (result, mask_out)
 
 
 class ControlCrossfadeSimple:
@@ -193,14 +231,7 @@ class ControlCrossfadeSimple:
                 result[i] = images_B[idx_b]
             else:
                 t = (i - blend_start) / max(1, blend_end - blend_start - 1)
-                if curve == "ease_in_out":
-                    w = t * t * (3.0 - 2.0 * t)
-                elif curve == "ease_in":
-                    w = t * t
-                elif curve == "ease_out":
-                    w = 1.0 - (1.0 - t) ** 2
-                else:
-                    w = t
+                w = _apply_curve(torch.tensor(t), curve).item()
                 result[i] = (1.0 - w) * images_A[idx_a] + w * images_B[idx_b]
 
         return (result,)
