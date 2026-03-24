@@ -2,10 +2,15 @@
 Iterative Video Generation Nodes
 
 Queue-based loop nodes for iterative video generation in ComfyUI.
-Uses server events + client-side JS to re-queue the workflow each iteration.
+Re-queues directly into ComfyUI's PromptQueue from Python — no JS roundtrip.
 """
 
+import copy
+import logging
 import os
+import time
+import uuid
+
 import torch
 import numpy as np
 from PIL import Image
@@ -18,43 +23,63 @@ FRAME_BUFFERS = {}   # buffer_key -> tensor (B, H, W, C) on CPU
 FRAME_SIZES = {}     # buffer_key -> list of cumulative frame counts after each iteration
 _ACTIVE_SESSION = None  # buffer_key of the last active FrameAccumulator
 _ITERATION_STATE = {}   # {"iteration": int, "last_frame_path": str}
+_QUEUE_SNAPSHOT = None   # {"prompt": dict, "extra_data": dict, "outputs_to_execute": list}
 
 
 # Iter node class names whose "iteration" input should be overridden
-_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer", "IterStringSelector"}
+_ITER_NODE_TYPES = {"IterVideoRouter", "IterationSwitch", "ControlImageSlicer", "MultiChannelSlicer", "FrameAccumulator", "EndFrameInjector", "BoundaryFrameExtractor", "BoundaryFrameSplicer", "IterStringSelector", "ControlCrossfadeIterationFix"}
+
+
+def _compute_outputs_to_execute(prompt):
+    """Derive OUTPUT_NODE IDs from the prompt dict."""
+    import nodes as comfy_nodes
+    return [nid for nid, nd in prompt.items()
+            if getattr(comfy_nodes.NODE_CLASS_MAPPINGS.get(nd.get("class_type", ""), object),
+                       "OUTPUT_NODE", False)]
+
+
+def _enqueue_next_iteration(iteration, last_frame_path):
+    """Deep-copy the snapshot prompt, inject iteration values, and queue directly."""
+    global _QUEUE_SNAPSHOT
+    if _QUEUE_SNAPSHOT is None:
+        logging.warning("[MMZ Iter] No queue snapshot available, cannot enqueue next iteration")
+        return
+
+    prompt = copy.deepcopy(_QUEUE_SNAPSHOT["prompt"])
+
+    # Inject iteration + last_frame_path into all iter nodes
+    for node_id, node_data in prompt.items():
+        class_type = node_data.get("class_type", "")
+        if class_type not in _ITER_NODE_TYPES:
+            continue
+        inputs = node_data.setdefault("inputs", {})
+        inputs["iteration"] = iteration
+        if class_type == "IterVideoRouter":
+            inputs["previous_frame_path"] = last_frame_path
+
+    extra_data = copy.deepcopy(_QUEUE_SNAPSHOT["extra_data"])
+    extra_data["create_time"] = int(time.time() * 1000)
+
+    prompt_id = str(uuid.uuid4())
+    outputs_to_execute = list(_QUEUE_SNAPSHOT["outputs_to_execute"])
+
+    # Priority -inf → front of queue (before any user-queued jobs)
+    queue_tuple = (-float('inf'), prompt_id, prompt, extra_data, outputs_to_execute, {})
+    PromptServer.instance.prompt_queue.put(queue_tuple)
+    logging.info("[MMZ Iter] Enqueued iteration %d (prompt_id=%s)", iteration, prompt_id)
 
 
 def _on_prompt_handler(json_data):
-    """Intercept every POST /prompt to inject the correct iteration value.
+    """Intercept POST /prompt to handle resume detection.
 
-    This is necessary because inside ComfyUI group nodes (subgraphs), inner
-    nodes are NOT in app.graph._nodes, so the JS widget-update approach fails.
-    The prompt dict, however, always contains the expanded inner nodes.
-
-    Auto-requeue is detected via a per-prompt marker in extra_data (not a
-    global flag), so concurrent/queued prompts can't corrupt each other.
+    Iteration re-queuing is done directly via PromptQueue.put() from
+    FrameAccumulator — this handler only needs to handle resume and
+    capture client_id for the first queue.
     """
     prompt = json_data.get("prompt", {})
-    extra_data = json_data.get("extra_data", {})
-    is_auto = extra_data.get("mmz_auto_requeue", False)
 
-    if is_auto and _ITERATION_STATE:
-        # Auto-requeue: inject iteration into all iter nodes from Python-side state.
-        # Always set (not just override) since iteration is now a hidden input.
-        iteration = _ITERATION_STATE["iteration"]
-        last_frame_path = _ITERATION_STATE.get("last_frame_path", "")
-        for node_id, node_data in prompt.items():
-            class_type = node_data.get("class_type", "")
-            if class_type not in _ITER_NODE_TYPES:
-                continue
-            inputs = node_data.setdefault("inputs", {})
-            inputs["iteration"] = iteration
-            if class_type == "IterVideoRouter":
-                inputs["previous_frame_path"] = last_frame_path
-        return json_data
-
-    # Not an auto-requeue — check for resume
     if not _ITERATION_STATE:
+        # Check for resume
         global _ACTIVE_SESSION
         for node_id, node_data in prompt.items():
             if node_data.get("class_type") != "FrameAccumulator":
@@ -556,9 +581,22 @@ class FrameAccumulator:
                    iteration=0, num_start_frames=0, blend_overlap=False,
                    resume_from_iteration=0, save_intermediate=False,
                    unique_id=None, prompt=None, extra_pnginfo=None):
-        global _ACTIVE_SESSION
+        global _ACTIVE_SESSION, _QUEUE_SNAPSHOT
         buffer_key = str(unique_id)
         _ACTIVE_SESSION = buffer_key
+
+        # Snapshot the post-replacement prompt on first iteration (or whenever
+        # snapshot is missing). This prompt comes from the hidden PROMPT input,
+        # which is the fully-processed, post-replacement version — safe to
+        # queue directly without going through apply_replacements again.
+        if _QUEUE_SNAPSHOT is None and prompt is not None:
+            client_id = PromptServer.instance.client_id
+            extra_data = {"client_id": client_id} if client_id else {}
+            _QUEUE_SNAPSHOT = {
+                "prompt": copy.deepcopy(prompt),
+                "extra_data": extra_data,
+                "outputs_to_execute": _compute_outputs_to_execute(prompt),
+            }
 
         # Safety: clear iteration state on fresh start so stale state can't persist
         if iteration == 0:
@@ -620,16 +658,16 @@ class FrameAccumulator:
         if save_intermediate:
             save_iteration_frames(new_frames, buffer_key, iteration)
 
-        # Loop control via server events
+        # Loop control: queue next iteration directly into PromptQueue
         if iteration < total_iterations - 1:
-            # Set Python-side state BEFORE triggering re-queue
             _ITERATION_STATE["iteration"] = iteration + 1
             _ITERATION_STATE["last_frame_path"] = last_frame_path
 
-            PromptServer.instance.send_sync("mmz-add-queue", {}, PromptServer.instance.client_id)
+            _enqueue_next_iteration(iteration + 1, last_frame_path)
         else:
             # Final iteration — clear loop state (buffer kept for potential resume)
             _ITERATION_STATE.clear()
+            _QUEUE_SNAPSHOT = None
             PromptServer.instance.send_sync("mmz-iter-reset", {}, PromptServer.instance.client_id)
 
         return (all_frames, all_frames.shape[0], last_frame)
