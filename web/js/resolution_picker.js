@@ -52,7 +52,13 @@ app.registerExtension({
             widthWidget.hidden = !isCustom;
             heightWidget.hidden = !isCustom;
 
-            node.setSize(node.computeSize());
+            // Preserve the saved size: only grow to the computed minimum if needed
+            const savedSize = [node.size[0], node.size[1]];
+            const minSize = node.computeSize();
+            node.setSize([
+                Math.max(savedSize[0], minSize[0]),
+                Math.max(savedSize[1], minSize[1])
+            ]);
         }
     }
 });
