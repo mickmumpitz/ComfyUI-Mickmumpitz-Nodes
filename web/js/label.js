@@ -2,9 +2,12 @@ import { app } from "../../../scripts/app.js";
 
 const NODE_TYPE = "MickmumpitzLabel";
 const NODE_TITLE = "Label (Mickmumpitz)";
+const MULTILINE_NODE_TYPE = "MickmumpitzMultilineLabel";
+const MULTILINE_NODE_TITLE = "Multiline Label (Mickmumpitz)";
 const CATEGORY = "Mickmumpitz/Utils";
 
 let labelClass = null;
+let multilineLabelClass = null;
 
 app.registerExtension({
     name: "Mickmumpitz.Label",
@@ -141,10 +144,65 @@ app.registerExtension({
         LiteGraph.registerNodeType(NODE_TYPE, MickmumpitzLabel);
         MickmumpitzLabel.category = CATEGORY;
 
+        // Multiline variant: same draw logic, but the property panel exposes a
+        // <textarea> so users can insert real line breaks with Enter.
+        class MickmumpitzMultilineLabel extends MickmumpitzLabel {
+            static title = MULTILINE_NODE_TITLE;
+            static type = MULTILINE_NODE_TYPE;
+            static title_mode = LiteGraph.NO_TITLE;
+            static collapsable = false;
+
+            constructor(title) {
+                super(title);
+                this.properties["text"] = "Multiline\nLabel";
+                this.size = [200, 80];
+            }
+
+            onShowCustomPanelInfo(panel) {
+                super.onShowCustomPanelInfo(panel);
+
+                const textPropDiv = panel.querySelector(
+                    'div.property[data-property="text"]'
+                );
+                if (!textPropDiv) return;
+                const input = textPropDiv.querySelector("input");
+                if (!input) return;
+
+                const textarea = document.createElement("textarea");
+                textarea.className = input.className;
+                // Migrate any literal "\n" sequences into real newlines for editing
+                textarea.value = (this.properties["text"] ?? "").replace(
+                    /\\n/g,
+                    "\n"
+                );
+                textarea.rows = 5;
+                textarea.style.width = "100%";
+                textarea.style.minHeight = "90px";
+                textarea.style.resize = "vertical";
+                textarea.style.fontFamily = "inherit";
+                textarea.style.boxSizing = "border-box";
+                textarea.spellcheck = false;
+
+                const sync = () => {
+                    this.properties["text"] = textarea.value;
+                    this.setDirtyCanvas(true, true);
+                };
+                textarea.addEventListener("input", sync);
+                textarea.addEventListener("change", sync);
+
+                input.replaceWith(textarea);
+            }
+        }
+
+        multilineLabelClass = MickmumpitzMultilineLabel;
+
+        LiteGraph.registerNodeType(MULTILINE_NODE_TYPE, MickmumpitzMultilineLabel);
+        MickmumpitzMultilineLabel.category = CATEGORY;
+
         // Patch drawNode so the label renders with custom draw, not the standard node chrome
         const origDrawNode = LGraphCanvas.prototype.drawNode;
         LGraphCanvas.prototype.drawNode = function (node, ctx) {
-            if (node.constructor === labelClass) {
+            if (node instanceof labelClass) {
                 node.bgcolor = "transparent";
                 node.color = "transparent";
                 const result = origDrawNode.apply(this, arguments);
