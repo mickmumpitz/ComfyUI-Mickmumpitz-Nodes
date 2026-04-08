@@ -125,18 +125,23 @@ app.registerExtension({
                     ...(sourceGroup._children || []),
                 ]);
 
-                // Snapshot Set/Get channel values BEFORE paste, keyed by
+                // Snapshot Set node channel values BEFORE paste, keyed by
                 // source node id. During `_deserializeItems`, KJNodes'
                 // `onConnectionsChange` fires validateName which auto-
                 // appends `_0` to collide-detected channel names — making
                 // the post-paste widget value unreliable. We'll use this
                 // pre-paste snapshot to recompute the correct new value
                 // after paste by matching on the preserved source id.
+                //
+                // GetNodes are intentionally NOT snapshotted or remapped:
+                // they are consumer references (often to external / shared
+                // Set nodes like SETTINGS outputs) and must keep their
+                // original channel name so the user's inputs stay wired
+                // to the same source across shots.
                 const sourceChannelValues = new Map();
                 for (const child of sourceGroup._children || []) {
-                    const ct = child?.type;
                     if (
-                        (ct === "SetNode" || ct === "GetNode") &&
+                        child?.type === "SetNode" &&
                         child.widgets?.[0] &&
                         typeof child.widgets[0].value === "string"
                     ) {
