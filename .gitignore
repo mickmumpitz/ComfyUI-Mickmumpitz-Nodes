@@ -44,3 +44,6 @@ Thumbs.db
 *.webp
 !examples/*.png
 !examples/*.jpg
+
+# To-Dos
+docs/

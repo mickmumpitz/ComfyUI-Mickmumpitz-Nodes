@@ -21,7 +21,12 @@ app.registerExtension({
             widthWidget.hidden = !isCustom;
             heightWidget.hidden = !isCustom;
 
-            node.setSize(node.computeSize());
+            const currentSize = [node.size[0], node.size[1]];
+            const minSize = node.computeSize();
+            node.setSize([
+                Math.max(currentSize[0], minSize[0]),
+                Math.max(currentSize[1], minSize[1])
+            ]);
         };
 
         const originalCallback = resolutionWidget.callback;
