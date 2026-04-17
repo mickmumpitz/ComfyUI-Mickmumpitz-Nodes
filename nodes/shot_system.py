@@ -1,6 +1,12 @@
+import os
+import re
+
+import folder_paths
 from server import PromptServer
 
-from ._video_utils import concatenate_videos
+from comfy_api.latest._util.video_types import VideoCodec, VideoContainer
+
+from ._video_utils import RESOLUTION_MODES, concatenate_videos
 
 # Maximum hidden dependency slots on ShotAssembler
 _MAX_DEPS = 20
@@ -102,6 +108,16 @@ class ShotVideoOutput:
 # ---------------------------------------------------------------------------
 # ShotAssembler
 # ---------------------------------------------------------------------------
+def _sanitize_folder(name: str) -> str:
+    """Strip path traversal and invalid filename characters from folder name."""
+    name = (name or "").strip()
+    # Reject drive letters, absolute paths, and parent traversal
+    name = name.replace("\\", "/").lstrip("/")
+    parts = [p for p in name.split("/") if p and p != "." and p != ".."]
+    cleaned = [re.sub(r'[<>:"|?*]', "_", p) for p in parts]
+    return "/".join(cleaned) or "shots"
+
+
 class ShotAssembler:
     """Collect all shot videos via hidden dep slots and concatenate in order.
 
@@ -118,7 +134,11 @@ class ShotAssembler:
         for i in range(1, _MAX_DEPS + 1):
             optional[f"_dep_{i}"] = ("*",)
         return {
-            "required": {},
+            "required": {
+                "resolution_mode": (RESOLUTION_MODES, {"default": "letterbox_to_first"}),
+                "save_individual_shots": ("BOOLEAN", {"default": False}),
+                "shots_folder": ("STRING", {"default": "shots"}),
+            },
             "optional": optional,
         }
 
@@ -128,7 +148,13 @@ class ShotAssembler:
     CATEGORY = "Mickmumpitz/Shot"
     OUTPUT_NODE = True
 
-    def assemble(self, **kwargs):
+    def assemble(
+        self,
+        resolution_mode,
+        save_individual_shots,
+        shots_folder,
+        **kwargs,
+    ):
         videos = []
         for i in range(1, _MAX_DEPS + 1):
             v = kwargs.get(f"_dep_{i}")
@@ -141,10 +167,26 @@ class ShotAssembler:
                 "are in the workflow."
             )
 
+        if save_individual_shots:
+            self._save_shots(videos, shots_folder)
+
         if len(videos) == 1:
             return (videos[0],)
 
-        return (concatenate_videos(videos),)
+        return (concatenate_videos(videos, resolution_mode=resolution_mode),)
+
+    @staticmethod
+    def _save_shots(videos, shots_folder):
+        folder = _sanitize_folder(shots_folder)
+        output_dir = os.path.join(folder_paths.get_output_directory(), folder)
+        os.makedirs(output_dir, exist_ok=True)
+        for idx, video in enumerate(videos, start=1):
+            path = os.path.join(output_dir, f"shot_{idx:02d}.mp4")
+            video.save_to(
+                path,
+                format=VideoContainer.AUTO,
+                codec=VideoCodec.AUTO,
+            )
 
 
 NODE_CLASS_MAPPINGS = {

@@ -1,4 +1,4 @@
-from ._video_utils import concatenate_videos
+from ._video_utils import RESOLUTION_MODES, concatenate_videos
 
 
 class VideoConcatenate:
@@ -10,7 +10,9 @@ class VideoConcatenate:
         for i in range(1, 11):
             optional[f"video_{i}"] = ("VIDEO",)
         return {
-            "required": {},
+            "required": {
+                "resolution_mode": (RESOLUTION_MODES, {"default": "letterbox_to_first"}),
+            },
             "optional": optional,
         }
 
@@ -18,7 +20,7 @@ class VideoConcatenate:
     FUNCTION = "concatenate"
     CATEGORY = "Mickmumpitz/Video"
 
-    def concatenate(self, **kwargs):
+    def concatenate(self, resolution_mode, **kwargs):
         videos = []
         for i in range(1, 11):
             v = kwargs.get(f"video_{i}")
@@ -31,7 +33,7 @@ class VideoConcatenate:
         if len(videos) == 1:
             return (videos[0],)
 
-        return (concatenate_videos(videos),)
+        return (concatenate_videos(videos, resolution_mode=resolution_mode),)
 
 
 NODE_CLASS_MAPPINGS = {
