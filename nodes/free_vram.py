@@ -10,6 +10,11 @@ without forcing a reload every run:
 - FreeVRAMUnlessLoaded: unload everything when a target pattern is *not*
   present in VRAM (e.g. ``flux`` — only purge if the image model isn't
   already there, so we don't churn it on every image run).
+
+Cleanup runs at *queue time* via an on_prompt_handler, not during node
+execution. This keeps the nodes out of the cache key signature of any
+downstream node — your cached image/video generation outputs are not
+invalidated when the cleanup state flips.
 """
 
 import gc
@@ -17,6 +22,10 @@ import logging
 
 import torch
 import comfy.model_management as mm
+from server import PromptServer
+
+
+# --- helpers -----------------------------------------------------------------
 
 
 def _model_identifier(loaded_model):
@@ -25,8 +34,8 @@ def _model_identifier(loaded_model):
     ``LoadedModel.model`` is typically a ``ModelPatcher``; ``.model.model``
     is the underlying ``nn.Module``. ComfyUI itself uses
     ``.model.model.__class__.__name__`` for unload logs, so we treat that
-    as the canonical identity. We also tack on the patcher's class name
-    in case the user wants to match against e.g. a custom wrapper.
+    as the canonical identity, plus the patcher class name for matching
+    against custom wrappers.
     """
     parts = []
     patcher = getattr(loaded_model, "model", None)
@@ -56,77 +65,118 @@ def _free_all():
         torch.cuda.empty_cache()
 
 
+def _literal_or(val, default):
+    """Return val if it's a literal primitive, else default.
+
+    Inside subgraphs, widget inputs can appear as link lists like
+    ``["upstream_id", 0]`` in the expanded prompt. We can't resolve those
+    at handler time, so we fall back to a default.
+    """
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return default
+
+
+# --- queue-time handler ------------------------------------------------------
+
+
+def _on_prompt_handler(json_data):
+    """Run conditional VRAM cleanup before the prompt executes.
+
+    Walks the submitted prompt for FreeVRAM* nodes and applies their
+    rules using the *current* VRAM state. This runs even when downstream
+    nodes will all cache-hit, so cleanup happens reliably without
+    poisoning anyone's cache key.
+    """
+    prompt = json_data.get("prompt", {})
+
+    if not prompt:
+        return json_data
+
+    should_free = False
+    reasons = []
+
+    for _node_id, node_data in prompt.items():
+        class_type = node_data.get("class_type")
+        inputs = node_data.get("inputs", {})
+
+        if class_type == "FreeVRAMIfLoaded":
+            pattern = _literal_or(inputs.get("if_loaded", ""), "")
+            if pattern and _is_pattern_loaded(pattern):
+                should_free = True
+                reasons.append(f"'{pattern}' is loaded")
+        elif class_type == "FreeVRAMUnlessLoaded":
+            pattern = _literal_or(inputs.get("unless_loaded", ""), "")
+            if pattern and not _is_pattern_loaded(pattern):
+                should_free = True
+                reasons.append(f"'{pattern}' is not loaded")
+
+    if should_free:
+        logging.info(f"[FreeVRAM] unloading all models — {'; '.join(reasons)}")
+        _free_all()
+
+    return json_data
+
+
+PromptServer.instance.add_on_prompt_handler(_on_prompt_handler)
+
+
+# --- nodes (config-only, no dataflow) ---------------------------------------
+
+
 class FreeVRAMIfLoaded:
     """Unload all models when ``if_loaded`` is currently in VRAM.
 
-    Wire this after video gen: set ``if_loaded`` to a substring of the
-    video model's class name (e.g. ``ltx`` or ``wan``). When the video
-    model is detected, everything is unloaded. When it's already gone,
-    this is a no-op passthrough.
+    Drop this node onto the graph and set ``if_loaded`` to a substring
+    of the video model's class name (e.g. ``ltx`` or ``wan``). When you
+    queue a prompt and that model is detected in VRAM, everything is
+    unloaded *before* execution starts. No wiring needed — this node is
+    a config marker, not part of the dataflow, so it never invalidates
+    downstream caches.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "value": ("*",),
                 "if_loaded": ("STRING", {"default": "ltx"}),
             },
         }
 
-    RETURN_TYPES = ("*",)
-    RETURN_NAMES = ("value",)
-    FUNCTION = "maybe_free"
+    RETURN_TYPES = ()
+    FUNCTION = "noop"
     CATEGORY = "Mickmumpitz/Utils"
+    OUTPUT_NODE = True
 
-    @classmethod
-    def IS_CHANGED(cls, value, if_loaded):
-        # State-aware: invalidate only when the "is the pattern loaded"
-        # state flips. Avoids forcing a re-run (and downstream cache miss)
-        # on every queue while still triggering cleanup the moment the
-        # video model appears in VRAM.
-        return f"loaded={_is_pattern_loaded(if_loaded)}"
-
-    def maybe_free(self, value, if_loaded):
-        if _is_pattern_loaded(if_loaded):
-            logging.info(f"[FreeVRAMIfLoaded] '{if_loaded}' detected in VRAM — unloading all models")
-            _free_all()
-        return (value,)
+    def noop(self, if_loaded):
+        return ()
 
 
 class FreeVRAMUnlessLoaded:
     """Unload all models *unless* ``unless_loaded`` is already in VRAM.
 
-    Wire this in front of the image checkpoint loader: set
-    ``unless_loaded`` to a substring of the image model's class name
-    (e.g. ``flux``). On the first run the image model isn't there,
-    so we purge to make room. On subsequent runs the image model is
-    already loaded — VRAM is left alone.
+    Drop this node onto the graph and set ``unless_loaded`` to a
+    substring of the image model's class name (e.g. ``flux``). When you
+    queue a prompt and that model isn't detected, everything else is
+    unloaded *before* execution starts so the image loader has room.
+    Once the image model is loaded on a subsequent queue, this no-ops.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "value": ("*",),
                 "unless_loaded": ("STRING", {"default": "flux"}),
             },
         }
 
-    RETURN_TYPES = ("*",)
-    RETURN_NAMES = ("value",)
-    FUNCTION = "maybe_free"
+    RETURN_TYPES = ()
+    FUNCTION = "noop"
     CATEGORY = "Mickmumpitz/Utils"
+    OUTPUT_NODE = True
 
-    @classmethod
-    def IS_CHANGED(cls, value, unless_loaded):
-        return f"loaded={_is_pattern_loaded(unless_loaded)}"
-
-    def maybe_free(self, value, unless_loaded):
-        if not _is_pattern_loaded(unless_loaded):
-            logging.info(f"[FreeVRAMUnlessLoaded] '{unless_loaded}' not in VRAM — unloading all models")
-            _free_all()
-        return (value,)
+    def noop(self, unless_loaded):
+        return ()
 
 
 NODE_CLASS_MAPPINGS = {
