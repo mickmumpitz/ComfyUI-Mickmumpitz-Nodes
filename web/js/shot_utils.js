@@ -30,14 +30,19 @@ export function replaceSuffix(str, oldSuffix, newSuffix) {
     return str.replace(re, `$1${newSuffix}$2`);
 }
 
-// Snapshot KJNodes Set channel values BEFORE paste, keyed by source node id.
-// `validateName` on paste may auto-suffix to disambiguate, so we can't trust
-// the post-paste widget value — we recompute from this snapshot.
+// Snapshot KJNodes Set/Get channel values BEFORE paste, keyed by source node id.
+// On paste, KJNodes runs `validateName` on the new SetNode to disambiguate from
+// the still-existing source SetNode. It strips the trailing `_\d+` to derive a
+// base ("OUT_01" → "OUT") and probes "OUT_0", "OUT_1", … until free — usually
+// landing on "OUT_0". That mangled name then propagates to the pasted GetNodes
+// via KJNodes' `_pasteRenameMap`, breaking them. The snapshot lets us override
+// both back: SetNodes get the shot-suffix rename, GetNodes get restored to
+// their original channel so they keep pointing at the source SetNode.
 function snapshotSourceChannels(sourceGroup) {
     const map = new Map();
     for (const child of sourceGroup._children || []) {
         if (
-            child?.type === "SetNode" &&
+            (child?.type === "SetNode" || child?.type === "GetNode") &&
             child.widgets?.[0] &&
             typeof child.widgets[0].value === "string"
         ) {
@@ -59,8 +64,18 @@ function remapSetGetChannels(
         if (!node || !node.widgets?.[0]) continue;
         if (typeof oldValue !== "string" || !oldValue) continue;
 
-        let newValue = replaceSuffix(oldValue, oldSuffix, newSuffix);
-        if (newValue === oldValue) newValue = `${oldValue}_${newSuffix}`;
+        let newValue;
+        if (node.type === "SetNode") {
+            // SetNode: bump the shot suffix so the duplicated shot gets its
+            // own channel (OUT_01 → OUT_02).
+            newValue = replaceSuffix(oldValue, oldSuffix, newSuffix);
+            if (newValue === oldValue) newValue = `${oldValue}_${newSuffix}`;
+        } else {
+            // GetNode: restore the original channel so it keeps reading from
+            // the source SetNode (OUT_01 stays OUT_01). KJNodes' validateName
+            // pass corrupts this via _pasteRenameMap; we override it back.
+            newValue = oldValue;
+        }
 
         node.widgets[0].value = newValue;
         if (node.type === "SetNode" && node.properties) {
