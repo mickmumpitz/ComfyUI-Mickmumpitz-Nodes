@@ -585,11 +585,23 @@ class FrameAccumulator:
         buffer_key = str(unique_id)
         _ACTIVE_SESSION = buffer_key
 
-        # Snapshot the post-replacement prompt on first iteration (or whenever
-        # snapshot is missing). This prompt comes from the hidden PROMPT input,
-        # which is the fully-processed, post-replacement version — safe to
-        # queue directly without going through apply_replacements again.
-        if _QUEUE_SNAPSHOT is None and prompt is not None:
+        # Safety: clear iteration state on fresh start so stale state can't persist
+        if iteration == 0:
+            _ITERATION_STATE.clear()
+
+        # Snapshot the post-replacement prompt. Refresh UNCONDITIONALLY at the start
+        # of every run (iteration 0), and also capture whenever it's missing (e.g.
+        # resume after a restart, where the run starts at iteration > 0).
+        #
+        # Refreshing on iteration 0 is critical: the snapshot is a module-level global
+        # and was previously only cleared on a *successful* final iteration. If a
+        # previous run was interrupted or errored mid-loop (common), the stale snapshot
+        # survived and got replayed by the next run — causing extra iterations
+        # (e.g. total=2 producing 3 when the stale snapshot came from a total=3 run)
+        # and buffer-key mismatches that exported only the current iteration with no
+        # blending. The hidden PROMPT input is the fully-processed, post-replacement
+        # version, so it is safe to queue directly without apply_replacements.
+        if (iteration == 0 or _QUEUE_SNAPSHOT is None) and prompt is not None:
             client_id = PromptServer.instance.client_id
             extra_data = {"client_id": client_id} if client_id else {}
             _QUEUE_SNAPSHOT = {
@@ -597,10 +609,6 @@ class FrameAccumulator:
                 "extra_data": extra_data,
                 "outputs_to_execute": _compute_outputs_to_execute(prompt),
             }
-
-        # Safety: clear iteration state on fresh start so stale state can't persist
-        if iteration == 0:
-            _ITERATION_STATE.clear()
 
         # Handle resume: truncate buffer to before this iteration
         if (resume_from_iteration > 0
