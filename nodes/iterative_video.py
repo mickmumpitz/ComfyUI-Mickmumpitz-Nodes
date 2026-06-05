@@ -58,6 +58,14 @@ def _enqueue_next_iteration(iteration, last_frame_path):
             inputs["previous_frame_path"] = last_frame_path
 
     extra_data = copy.deepcopy(_QUEUE_SNAPSHOT["extra_data"])
+    # Use the LIVE client_id, not the one frozen in the snapshot. Iterations take
+    # minutes; if the browser/websocket reconnects mid-loop it gets a new client_id,
+    # and a re-queue addressed to the old (dead) client streams its progress and
+    # results nowhere — the UI looks frozen. Re-reading the current client each
+    # enqueue keeps later iterations attached to whoever is actually connected.
+    live_client_id = PromptServer.instance.client_id
+    if live_client_id:
+        extra_data["client_id"] = live_client_id
     extra_data["create_time"] = int(time.time() * 1000)
 
     prompt_id = str(uuid.uuid4())
