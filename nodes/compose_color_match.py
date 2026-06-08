@@ -36,6 +36,16 @@ Compositing is always "source over destination": out = dest*(1-mask) + src*mask.
 
 Wiring for grade match: source = the regenerated frame (with the new element),
 destination = the original footage, mask = the region to keep from the source.
+
+Element trims (saturation / black_point)
+----------------------------------------
+A VAE round-trip tends to slightly desaturate and lift the blacks ("milky")
+of the regenerated content. Grade match fixes luminance/contrast/white-balance
+from the surround, but the surround is usually less saturated than the inserted
+element, so a linear per-channel fit under-restores the element's saturation.
+Two optional trims run on the corrected source before compositing:
+  - saturation : luma-preserving saturation scale (1.0 = unchanged).
+  - black_point: pull lifted blacks back down to de-milk (0.0 = unchanged).
 """
 
 import logging
@@ -127,6 +137,9 @@ class ComposeColorMatch:
                     {"default": "Grade match (surround)"},
                 ),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                # --- Element trims (applied to the corrected source) ---
+                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01}),
+                "black_point": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.2, "step": 0.001}),
                 # --- Grade match (surround) settings ---
                 "grade_fit": (["Gain + offset", "Offset only"], {"default": "Gain + offset"}),
                 "surround_band": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 1}),
@@ -162,6 +175,8 @@ class ComposeColorMatch:
         mask,
         correction,
         strength,
+        saturation,
+        black_point,
         grade_fit,
         surround_band,
         colormatch_reference,
@@ -218,6 +233,10 @@ class ComposeColorMatch:
                     recolored = self._match_frame(s, d, mi, method, strength, match_region)
                     s = self._apply_region(s, recolored, mi, recolor_region)
 
+            # Polish the inserted element (restore saturation / de-milk) before comp.
+            if saturation != 1.0 or black_point > 0.0:
+                s = self._trim(s, saturation, black_point)
+
             # source over destination
             return d * (1.0 - mi) + s * mi
 
@@ -230,6 +249,22 @@ class ComposeColorMatch:
 
         result = torch.stack(out, dim=0).to(torch.float32).clamp_(0.0, 1.0)
         return (result,)
+
+    # ------------------------------------------------------------------ #
+    # Element trims -- counteract VAE desaturation / lifted blacks
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _trim(img, saturation, black_point):
+        """Polish (H,W,3): lift the black point (de-milk), then scale saturation
+        about luma (hue/grading preserving). Output is clamped downstream."""
+        out = img
+        if black_point > 0.0:
+            out = (out - black_point) / (1.0 - black_point)
+        if saturation != 1.0:
+            luma_w = torch.tensor([0.2126, 0.7152, 0.0722], dtype=out.dtype)
+            luma = (out * luma_w).sum(dim=-1, keepdim=True)
+            out = luma + saturation * (out - luma)
+        return out
 
     # ------------------------------------------------------------------ #
     # Grade match (surround) -- paired differential grading
