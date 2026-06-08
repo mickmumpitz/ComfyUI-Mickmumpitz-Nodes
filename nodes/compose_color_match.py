@@ -164,11 +164,10 @@ class ComposeColorMatch:
                 # --- Color match (palette) settings ---
                 "colormatch_reference": (["Source", "Destination"], {"default": "Destination"}),
                 "method": (_METHODS, {"default": "mkl"}),
-                "match_region": (
-                    ["Whole frame", "Masked region", "Outside masked region"],
-                    {"default": "Whole frame"},
+                "reference_region": (
+                    ["Outside mask", "Full frame", "Inside mask"],
+                    {"default": "Outside mask"},
                 ),
-                "recolor_region": (["Full frame", "Source", "Destination"], {"default": "Source"}),
                 "multithread": ("BOOLEAN", {"default": True}),
             },
         }
@@ -200,8 +199,7 @@ class ComposeColorMatch:
         surround_band,
         colormatch_reference,
         method,
-        match_region,
-        recolor_region,
+        reference_region,
         multithread,
     ):
         # Canvas is the destination size; source & mask are resized to match.
@@ -249,12 +247,10 @@ class ComposeColorMatch:
                     # paired surround, then composite its masked region.
                     s = self._grade_match(s, d, mi, grade_fit, surround_band, strength)
                 elif colormatch_reference == "Source":
-                    # recolor destination to match the source frame
-                    recolored = self._match_frame(d, s, mi, method, strength, match_region)
-                    d = self._apply_region(d, recolored, mi, recolor_region)
-                else:  # "Destination": recolor source to match the destination frame
-                    recolored = self._match_frame(s, d, mi, method, strength, match_region)
-                    s = self._apply_region(s, recolored, mi, recolor_region)
+                    # reference = source -> recolor the destination (the "other" image)
+                    d = self._match_frame(d, s, mi, method, strength, reference_region)
+                else:  # reference = destination -> recolor the source
+                    s = self._match_frame(s, d, mi, method, strength, reference_region)
 
             # Polish the inserted element (restore saturation / de-milk) before comp.
             if trims_on:
@@ -331,31 +327,21 @@ class ComposeColorMatch:
     # Color match (palette) -- distribution transfer via color-matcher
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _apply_region(original, recolored, mask_hw1, recolor_region):
-        """Blend ``recolored`` back onto ``original`` (both H,W,3) limited to the
-        chosen region, feathered by the soft mask (H,W,1)."""
-        if recolor_region == "Full frame":
-            return recolored
-        # "Source" writes inside the mask; "Destination" writes outside it.
-        w = mask_hw1 if recolor_region == "Source" else (1.0 - mask_hw1)
-        return original * (1.0 - w) + recolored * w
-
-    @staticmethod
-    def _match_frame(target, reference, mask_hw1, method, strength, match_region):
+    def _match_frame(target, reference, mask_hw1, method, strength, reference_region):
         """Recolor ``target`` (H,W,3) so its colors match ``reference`` (H,W,3),
-        sampling the reference palette according to ``match_region``."""
+        sampling the reference palette according to ``reference_region``."""
         from color_matcher import ColorMatcher
 
         target_np = target.numpy()
         ref_np = reference.numpy()
 
-        if match_region == "Whole frame":
+        if reference_region == "Full frame":
             region_ref = ref_np
         else:
             mask2d = mask_hw1[..., 0].numpy()
-            if match_region == "Masked region":
+            if reference_region == "Inside mask":
                 sel = mask2d > 0.5
-            else:  # "Outside masked region"
+            else:  # "Outside mask"
                 sel = mask2d <= 0.5
             pixels = ref_np[sel]  # (K,3)
             if pixels.shape[0] < _MIN_REGION_PIXELS:
