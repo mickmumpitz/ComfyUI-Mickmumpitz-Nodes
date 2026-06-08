@@ -169,6 +169,18 @@ class ComposeColorMatch:
                     {"default": "Outside mask"},
                 ),
                 "multithread": ("BOOLEAN", {"default": True}),
+                # --- Temporal anchor (iteration continuity) ---
+                "temporal_anchor": ("BOOLEAN", {"default": False}),
+                "anchor_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "anchor_frames": ("INT", {"default": 0, "min": 0, "max": 99, "step": 1}),
+            },
+            "optional": {
+                # Previous iteration's corrected tail (e.g. IterVideoRouter
+                # current_start) -- the temporal-anchor reference.
+                "previous_frames": ("IMAGE",),
+            },
+            "hidden": {
+                "iteration": "INT",
             },
         }
 
@@ -182,7 +194,9 @@ class ComposeColorMatch:
         "the VAE/grading drift from the unchanged area outside the mask (where source "
         "& destination share content) and applies it to the source inside the mask -- "
         "fixes seam luminance/contrast without changing the element's colors. "
-        "'Color match (palette)' is the distribution-based color-matcher approach."
+        "'Color match (palette)' is the distribution-based color-matcher approach. "
+        "'temporal_anchor' (iterative video) re-matches each iteration's element to "
+        "the previous iteration's corrected tail so VAE drift can't compound."
     )
 
     def compose(
@@ -201,6 +215,11 @@ class ComposeColorMatch:
         method,
         reference_region,
         multithread,
+        temporal_anchor=False,
+        anchor_strength=1.0,
+        anchor_frames=0,
+        previous_frames=None,
+        iteration=0,
     ):
         # Canvas is the destination size; source & mask are resized to match.
         dest = destination[..., :3].cpu().float()
@@ -228,6 +247,21 @@ class ComposeColorMatch:
         # Inner-distance ramp so the trims fade to 0 at the mask border (no seam).
         edge_w = _inner_ramp(m, edge_falloff) if (trims_on and edge_falloff > 0) else None
 
+        # Temporal anchor: re-match this iteration's corrected element to the
+        # previous iteration's corrected tail so VAE drift (paleness / lifted
+        # blacks) can't compound across iterations. Only on iteration > 0 with a
+        # reference wired in (e.g. IterVideoRouter's current_start).
+        anchor_active = (
+            temporal_anchor and anchor_strength != 0
+            and previous_frames is not None and iteration > 0
+        )
+        ref = None
+        if anchor_active:
+            ref = previous_frames[..., :3].cpu().float()
+            ref = _resize_bhwc(ref, height, width)
+            if ref.shape[0] == 0:
+                anchor_active = False
+
         n = max(dest.shape[0], src.shape[0], m.shape[0])
         if len({dest.shape[0], src.shape[0], m.shape[0]} - {1}) > 1:
             logging.warning(
@@ -236,15 +270,17 @@ class ComposeColorMatch:
                 f"producing {n} frames (clamping shorter inputs to their last frame)."
             )
 
-        def process(i):
+        def compute_element(i):
+            """Correct one frame's source down to (d, element, mask) -- everything
+            up to but not including the final composite, so the temporal anchor can
+            be fit on the corrected elements before they're composited."""
             d = _pick(dest, i)  # (H,W,3) destination / original plate
             s = _pick(src, i)   # (H,W,3) source / inserted element
             mi = _pick(m, i)    # (H,W,1)
 
             if active:
                 if correction == "Grade match (surround)":
-                    # Correct the source's grading to the plate using the
-                    # paired surround, then composite its masked region.
+                    # Correct the source's grading to the plate using the paired surround.
                     s = self._grade_match(s, d, mi, grade_fit, surround_band, strength)
                 elif colormatch_reference == "Source":
                     # reference = source -> recolor the destination (the "other" image)
@@ -257,16 +293,29 @@ class ComposeColorMatch:
                 ew = _pick(edge_w, i) if edge_w is not None else None
                 s = self._trim(s, saturation, black_point, ew)
 
-            # source over destination
-            return d * (1.0 - mi) + s * mi
+            return d, s, mi
 
         if multithread and n > 1:
             max_threads = min(os.cpu_count() or 1, n)
             with ThreadPoolExecutor(max_workers=max_threads) as ex:
-                out = list(ex.map(process, range(n)))
+                elems = list(ex.map(compute_element, range(n)))
         else:
-            out = [process(i) for i in range(n)]
+            elems = [compute_element(i) for i in range(n)]
 
+        # Re-anchor the whole iteration's element to the previous tail (one affine,
+        # fit on the content-paired overlap, applied to every frame).
+        if anchor_active:
+            a, b = self._anchor_fit(elems, ref, anchor_frames)
+            if a is not None:
+                for i in range(n):
+                    d, s, mi = elems[i]
+                    corrected = s * a + b
+                    if anchor_strength != 1.0:
+                        corrected = s + anchor_strength * (corrected - s)
+                    elems[i] = (d, corrected, mi)
+
+        # source over destination
+        out = [d * (1.0 - mi) + s * mi for (d, s, mi) in elems]
         result = torch.stack(out, dim=0).to(torch.float32).clamp_(0.0, 1.0)
         return (result,)
 
@@ -322,6 +371,51 @@ class ComposeColorMatch:
         if strength != 1.0:
             corrected = target + strength * (corrected - target)
         return corrected
+
+    # ------------------------------------------------------------------ #
+    # Temporal anchor -- iteration-to-iteration continuity
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _anchor_fit(elems, ref, anchor_frames):
+        """Fit a per-channel affine mapping the current iteration's corrected
+        element to the previous iteration's corrected tail, sampled INSIDE the
+        mask over the content-paired overlap frames.
+
+        ``elems`` is the list of (d, element, mask) tuples for this iteration;
+        ``ref`` is (R,H,W,3), the previous corrected tail. The overlap pairs the
+        first ``ov`` element frames (which the model regenerated FROM the tail, so
+        they share content) with ``ref[-ov:]``. Pixels are pooled across all
+        overlap frames for one stable fit. Returns (a, b) as (3,) tensors, or
+        (None, None) when there aren't enough paired masked pixels to trust."""
+        r = ref.shape[0]
+        n = len(elems)
+        ov = anchor_frames if anchor_frames > 0 else r
+        ov = min(ov, r, n)
+        if ov < 1:
+            return None, None
+
+        g_parts, o_parts = [], []
+        for k in range(ov):
+            _, s_k, m_k = elems[k]
+            o_k = ref[r - ov + k]            # paired previous-tail frame
+            sel = m_k[..., 0] > 0.5          # the element (only region in the output)
+            if int(sel.sum()) == 0:
+                continue
+            g_parts.append(s_k[sel])         # current corrected element
+            o_parts.append(o_k[sel])         # previous corrected element (target)
+
+        if not g_parts:
+            return None, None
+        g = torch.cat(g_parts, dim=0)
+        o = torch.cat(o_parts, dim=0)
+        if g.shape[0] < _MIN_REGION_PIXELS:
+            return None, None
+
+        a = torch.ones(3)
+        b = torch.zeros(3)
+        for c in range(3):
+            a[c], b[c] = _fit_channel(g[:, c], o[:, c], "Gain + offset")
+        return a, b
 
     # ------------------------------------------------------------------ #
     # Color match (palette) -- distribution transfer via color-matcher
