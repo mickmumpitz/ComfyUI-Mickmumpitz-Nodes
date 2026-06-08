@@ -33,12 +33,18 @@ class ControlCrossfadeIterationFix:
     Blends start_frames into control_frames to prevent flash artifacts at
     iteration boundaries.
 
-    Zones (0-indexed):
+    Zones (0-indexed), iteration 1+:
       [0, blend_start)             → pure start_frames
       [blend_start, num_start_frames) → cross-fade
       [num_start_frames, ...)       → pure control_frames
 
     Where blend_start = num_start_frames - blend_length.
+
+    Iteration 0 (no previous chunk to fade from):
+      [0, len(start_frames))       → start_frames injected directly (no fade)
+      [len(start_frames), ...)     → pure control_frames
+    Only the frames actually present in start_frames are injected (typically a
+    single user-supplied start image); num_start_frames is ignored on iter 0.
     """
 
     @classmethod
@@ -92,13 +98,31 @@ class ControlCrossfadeIterationFix:
         else:
             mask_B = 0
 
-        # First iteration: pass through unchanged
+        # First iteration: inject the start frame(s) directly, NO cross-fade.
+        # There's no previous iteration to fade from, so we hard-place ONLY the
+        # frames actually provided in start_frames (the user supplies a single
+        # start image on iter 0) at the head and leave the rest as pure control.
+        # num_start_frames is NOT used here so we don't duplicate the start frame
+        # across the whole start zone — it only governs the cross-fade on iter 1+.
+        # The injected zone is locked via the mask (black).
         if iteration == 0:
+            result = control_frames.clone()
+            B_start = start_frames.shape[0]
+            inject_end = min(B_start, B)
+
+            for i in range(inject_end):
+                result[i] = start_frames[i]
+
             if mask is not None:
-                mask_out = mask
+                mask_out = torch.zeros(B, H, W, device=device)
+                # Injected start zone stays black (locked); control zone keeps mask
+                for i in range(inject_end, B):
+                    mi = min(i, mask_B - 1)
+                    mask_out[i] = mask[mi]
             else:
                 mask_out = torch.ones(B, H, W, device=device)
-            return (control_frames, mask_out)
+
+            return (result, mask_out)
 
         # --- Zone boundaries (0-indexed) ---
         blend_start = max(0, num_start_frames - blend_length)
