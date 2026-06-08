@@ -46,6 +46,9 @@ element, so a linear per-channel fit under-restores the element's saturation.
 Two optional trims run on the corrected source before compositing:
   - saturation : luma-preserving saturation scale (1.0 = unchanged).
   - black_point: pull lifted blacks back down to de-milk (0.0 = unchanged).
+  - edge_falloff: feather the trims inward from the mask edge (px). At the very
+    border the trims are 0 (so it matches the plate seamlessly) and ramp to full
+    strength ``edge_falloff`` px inside. 0 = uniform (no feather).
 """
 
 import logging
@@ -91,6 +94,20 @@ def _dilate(binary_hw, band):
     k = 2 * band + 1
     d = F.max_pool2d(binary_hw[None, None], kernel_size=k, stride=1, padding=band)
     return d[0, 0] > 0.5
+
+
+def _inner_ramp(m_bhw1, falloff):
+    """Inner-distance ramp for a (B,H,W,1) soft mask: 0 at the mask edge, rising
+    linearly to 1 at ``falloff`` px inside. Built by iterative 3x3 erosion, so a
+    pixel's value is its (clamped) depth from the border / falloff. Returns
+    (B,H,W,1)."""
+    x = (m_bhw1[..., 0] > 0.5).float()[:, None]  # (B,1,H,W)
+    acc = torch.zeros_like(x)
+    cur = x
+    for _ in range(falloff):
+        cur = -F.max_pool2d(-cur, kernel_size=3, stride=1, padding=1)  # erosion
+        acc = acc + cur
+    return (acc / falloff).clamp_(0.0, 1.0).movedim(1, -1)  # (B,H,W,1)
 
 
 def _fit_channel(g, o, fit):
@@ -140,6 +157,7 @@ class ComposeColorMatch:
                 # --- Element trims (applied to the corrected source) ---
                 "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01}),
                 "black_point": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.2, "step": 0.001}),
+                "edge_falloff": ("INT", {"default": 0, "min": 0, "max": 512, "step": 1}),
                 # --- Grade match (surround) settings ---
                 "grade_fit": (["Gain + offset", "Offset only"], {"default": "Gain + offset"}),
                 "surround_band": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 1}),
@@ -177,6 +195,7 @@ class ComposeColorMatch:
         strength,
         saturation,
         black_point,
+        edge_falloff,
         grade_fit,
         surround_band,
         colormatch_reference,
@@ -207,6 +226,10 @@ class ComposeColorMatch:
                     "Can't import color-matcher. Install with: pip install color-matcher"
                 ) from e
 
+        trims_on = saturation != 1.0 or black_point > 0.0
+        # Inner-distance ramp so the trims fade to 0 at the mask border (no seam).
+        edge_w = _inner_ramp(m, edge_falloff) if (trims_on and edge_falloff > 0) else None
+
         n = max(dest.shape[0], src.shape[0], m.shape[0])
         if len({dest.shape[0], src.shape[0], m.shape[0]} - {1}) > 1:
             logging.warning(
@@ -234,8 +257,9 @@ class ComposeColorMatch:
                     s = self._apply_region(s, recolored, mi, recolor_region)
 
             # Polish the inserted element (restore saturation / de-milk) before comp.
-            if saturation != 1.0 or black_point > 0.0:
-                s = self._trim(s, saturation, black_point)
+            if trims_on:
+                ew = _pick(edge_w, i) if edge_w is not None else None
+                s = self._trim(s, saturation, black_point, ew)
 
             # source over destination
             return d * (1.0 - mi) + s * mi
@@ -254,16 +278,20 @@ class ComposeColorMatch:
     # Element trims -- counteract VAE desaturation / lifted blacks
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _trim(img, saturation, black_point):
+    def _trim(img, saturation, black_point, edge_w=None):
         """Polish (H,W,3): lift the black point (de-milk), then scale saturation
-        about luma (hue/grading preserving). Output is clamped downstream."""
+        about luma (hue/grading preserving). ``edge_w`` (H,W,1 or None) feathers
+        both trims toward identity where it is 0. Output is clamped downstream."""
+        w = 1.0 if edge_w is None else edge_w
         out = img
         if black_point > 0.0:
-            out = (out - black_point) / (1.0 - black_point)
+            bp = black_point * w  # per-pixel black point (0 at the mask edge)
+            out = (out - bp) / (1.0 - bp)
         if saturation != 1.0:
             luma_w = torch.tensor([0.2126, 0.7152, 0.0722], dtype=out.dtype)
             luma = (out * luma_w).sum(dim=-1, keepdim=True)
-            out = luma + saturation * (out - luma)
+            sat = 1.0 + (saturation - 1.0) * w  # 1.0 (no change) at the mask edge
+            out = luma + sat * (out - luma)
         return out
 
     # ------------------------------------------------------------------ #
