@@ -377,16 +377,23 @@ class ComposeColorMatch:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _anchor_fit(elems, ref, anchor_frames):
-        """Fit a per-channel affine mapping the current iteration's corrected
-        element to the previous iteration's corrected tail, sampled INSIDE the
-        mask over the content-paired overlap frames.
+        """Match the current iteration's corrected element distribution to the
+        previous iteration's corrected tail, sampled INSIDE the mask.
+
+        Unlike grade match (which regresses paired pixels of the SAME plate), the
+        anchor compares two INDEPENDENT generations of the element -- the current
+        head vs the previous tail. WAN doesn't reproduce the start frames
+        pixel-for-pixel, so per-pixel correspondence is unreliable; a covariance
+        fit would collapse and wash the element out. Instead we match per-channel
+        mean and std (distribution transfer), which is alignment-free and restores
+        saturation/contrast via the std ratio.
 
         ``elems`` is the list of (d, element, mask) tuples for this iteration;
-        ``ref`` is (R,H,W,3), the previous corrected tail. The overlap pairs the
-        first ``ov`` element frames (which the model regenerated FROM the tail, so
-        they share content) with ``ref[-ov:]``. Pixels are pooled across all
-        overlap frames for one stable fit. Returns (a, b) as (3,) tensors, or
-        (None, None) when there aren't enough paired masked pixels to trust."""
+        ``ref`` is (R,H,W,3), the previous corrected tail. Element pixels are
+        pooled across the overlap frames (the last ``ov`` of ``ref``, the first
+        ``ov`` of the iteration). Returns (a, b) as (3,) tensors mapping
+        ``a*current + b`` toward the reference, or (None, None) when there aren't
+        enough masked pixels to trust."""
         r = ref.shape[0]
         n = len(elems)
         ov = anchor_frames if anchor_frames > 0 else r
@@ -401,8 +408,8 @@ class ComposeColorMatch:
             sel = m_k[..., 0] > 0.5          # the element (only region in the output)
             if int(sel.sum()) == 0:
                 continue
-            g_parts.append(s_k[sel])         # current corrected element
-            o_parts.append(o_k[sel])         # previous corrected element (target)
+            g_parts.append(s_k[sel])         # current corrected element pixels
+            o_parts.append(o_k[sel])         # previous corrected element pixels (target)
 
         if not g_parts:
             return None, None
@@ -411,10 +418,16 @@ class ComposeColorMatch:
         if g.shape[0] < _MIN_REGION_PIXELS:
             return None, None
 
+        # Per-channel distribution (mean/std) transfer -- robust to the spatial
+        # mismatch between two independent generations of the same element.
+        gm, om = g.mean(dim=0), o.mean(dim=0)
+        gs, os_ = g.std(dim=0), o.std(dim=0)
         a = torch.ones(3)
         b = torch.zeros(3)
         for c in range(3):
-            a[c], b[c] = _fit_channel(g[:, c], o[:, c], "Gain + offset")
+            if gs[c] > 1e-5:
+                a[c] = (os_[c] / gs[c]).clamp(0.2, 5.0)
+            b[c] = om[c] - a[c] * gm[c]
         return a, b
 
     # ------------------------------------------------------------------ #
