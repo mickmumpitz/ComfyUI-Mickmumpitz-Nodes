@@ -9,6 +9,7 @@ A collection of custom nodes for ComfyUI by Mickmumpitz.
 - **Video Utilities** — Video concatenation and related tools
 - **String Batch** — Story/style selectors and string batch processing
 - **Utilities** — Resolution pickers, preprocessing settings, execution gates, and other helper nodes
+- **Consistent Character Creator** — LoRA dataset tools: batch loaders, the model-specific captioning Prompt Studio, the Ideogram 4 tagger, bbox converters, the interactive Dataset Reviewer, face-area batch routing, and a branch gate
 
 ## Installation
 
@@ -27,6 +28,16 @@ Clone this repository into your ComfyUI custom nodes directory:
 cd ComfyUI/custom_nodes
 git clone https://github.com/mickmumpitz/ComfyUI-Mickmumpitz-Nodes.git
 ```
+
+### Optional dependencies
+
+The Consistent Character Creator face-area nodes work without any extra install if you
+wire an `UltralyticsDetectorProvider` node (ComfyUI Impact Subpack) into the splitter's
+`bbox_detector` input, and `SEGS Filter by Relative Area` likewise consumes Impact's
+`SEGS`. Only if you leave `bbox_detector` empty and let **Face Area Batch Splitter**
+load its own model does it need `ultralytics` (`pip install ultralytics`) plus a face
+model such as `face_yolov8m.pt` in `ComfyUI/models/ultralytics/bbox/`. Neither is
+required for the pack to load.
 
 ## License
 
