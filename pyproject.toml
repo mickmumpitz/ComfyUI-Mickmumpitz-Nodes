@@ -1,5 +1,5 @@
 [project]
-name = "mickmumpitz-nodes"
+name = "comfyui-mickmumpitz-nodes"
 description = "A collection of custom nodes for ComfyUI by Mickmumpitz"
 version = "1.3.1"
 license = {file = "LICENSE"}
