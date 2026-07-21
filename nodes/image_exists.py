@@ -18,8 +18,10 @@ class ImageExists:
     def check(self, image=None):
         if image is not None:
             return (image, True)
-        # 1x1 black BHWC placeholder so downstream nodes don't choke
-        placeholder = torch.zeros(1, 1, 1, 3)
+        # 64x64 black BHWC placeholder: large enough to survive VAE encoding
+        # (vae_encode_crop_pixels rounds smaller images down to 0x0 and crashes)
+        # on setups where a non-lazy switch evaluates the unused branch
+        placeholder = torch.zeros(1, 64, 64, 3)
         return (placeholder, False)
 
 

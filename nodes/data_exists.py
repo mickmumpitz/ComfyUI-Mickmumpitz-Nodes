@@ -43,7 +43,9 @@ class MaskExists:
     def check(self, mask=None):
         if mask is not None:
             return (mask, True)
-        placeholder = torch.zeros(1, 1, 1)
+        # 64x64 so resolution-sensitive consumers (e.g. VAE paths) don't choke
+        # when a non-lazy switch evaluates the unused branch
+        placeholder = torch.zeros(1, 64, 64)
         return (placeholder, False)
 
 
