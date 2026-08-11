@@ -8,7 +8,7 @@ A collection of custom nodes for ComfyUI by Mickmumpitz.
 - **Video Context** — Context image and control frame extraction for video workflows
 - **Video Utilities** — Video concatenation and related tools
 - **String Batch** — Story/style selectors and string batch processing
-- **Utilities** — Resolution pickers, preprocessing settings, execution gates, and other helper nodes
+- **Utilities** — Resolution pickers (including **MiniMax H3 Resolution**, which takes the aspect ratio from the reference clip because H3 reframes rather than letterboxes, and scales the canvas from there), preprocessing settings, execution gates, and other helper nodes
 - **Consistent Character Creator** — LoRA dataset tools: batch loaders, the model-specific captioning Prompt Studio, the Ideogram 4 tagger, bbox converters, the interactive Dataset Reviewer, face-area batch routing, and a branch gate
 
 ## Installation
