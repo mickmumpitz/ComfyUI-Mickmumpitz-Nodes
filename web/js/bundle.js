@@ -13,8 +13,53 @@ const REROUTE_TYPES = new Set(["Reroute", "Reroute (rgthree)", "ReroutePrimitive
 const GETNODE_TYPES = new Set(["GetNode"]);
 const SETNODE_TYPES = new Set(["SetNode"]);
 
+// Mirror the Python `_on_prompt_handler`: inject each UnbundleByName's BUNDLE
+// link into the prompt dict by matching its `source_bundle` against a Bundle's
+// `name`. Doing this on the CLIENT (inside graphToPrompt) — not just server-side
+// — is what makes the bundle->unbundle dependency visible to any consumer that
+// walks the prompt's `inputs` to prune a partial graph (e.g. SplatKit's
+// "Compute geometry", which queues only the ancestors of a target node). Without
+// it, the Bundle node is dropped from the partial prompt and the server rejects
+// the UnbundleByName with "Required input is missing: bundle".
+function injectBundleLinks(output) {
+    if (!output || typeof output !== "object") return;
+    const bundlesByName = {};
+    for (const id in output) {
+        const node = output[id];
+        if (!node || node.class_type !== NODE_BUNDLE) continue;
+        const rawName = node.inputs ? node.inputs.name : undefined;
+        if (Array.isArray(rawName)) continue;
+        const name = String(rawName == null ? "" : rawName).trim();
+        if (!name) continue;
+        bundlesByName[name] = id;
+    }
+    for (const id in output) {
+        const node = output[id];
+        if (!node || node.class_type !== NODE_UNBUNDLE_BY_NAME) continue;
+        const inputs = node.inputs || (node.inputs = {});
+        const rawSource = inputs.source_bundle;
+        if (Array.isArray(rawSource)) continue;
+        const source = String(rawSource == null ? "" : rawSource).trim();
+        if (source && bundlesByName[source]) {
+            inputs.bundle = [bundlesByName[source], 0];
+        }
+    }
+}
+
 app.registerExtension({
     name: "Mickmumpitz.Bundle",
+
+    async setup() {
+        const orig = app.graphToPrompt;
+        if (typeof orig !== "function" || orig._mmzBundleHooked) return;
+        const hooked = async function (...args) {
+            const result = await orig.apply(this, args);
+            try { injectBundleLinks(result && result.output); } catch (e) { /* non-fatal */ }
+            return result;
+        };
+        hooked._mmzBundleHooked = true;
+        app.graphToPrompt = hooked;
+    },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name === NODE_BUNDLE) {
