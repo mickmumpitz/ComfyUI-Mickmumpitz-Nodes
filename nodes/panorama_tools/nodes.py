@@ -148,26 +148,29 @@ class PerspToErpWarp:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "width": ("INT", {"default": 1440, "min": 64, "max": 8192, "step": 16,
+                "width": ("INT", {"default": 1408, "min": 64, "max": 8192, "step": 16,
                     "tooltip": "ERP canvas width. Keep 2:1 (width = 2*height) for a full pano."}),
-                "height": ("INT", {"default": 720, "min": 32, "max": 4096, "step": 16}),
-                "length": ("INT", {"default": 5, "min": 1, "max": 257, "step": 4,
+                "height": ("INT", {"default": 704, "min": 32, "max": 4096, "step": 16}),
+                "length": ("INT", {"default": 1, "min": 1, "max": 257, "step": 4,
                     "tooltip": "Frames in the still batch (N = 1+4k). 1 = single ERP still "
                                "(fastest); 5 gives a video model a little temporal extent."}),
-                "h_fov_deg": ("FLOAT", {"default": 90.0, "min": 20.0, "max": 170.0, "step": 1.0,
-                    "tooltip": "HORIZONTAL field of view of the source photo, in degrees. Vertical "
-                               "FOV follows from the image aspect (square pixels). Match your "
+                "h_fov_deg": ("FLOAT", {"default": 70.0, "min": 10.0, "max": 170.0, "step": 0.5,
+                    "tooltip": "HORIZONTAL field of view of the source photo, in degrees. Photos "
+                               "do not carry this, so it is set here. Too small places the photo "
+                               "too tightly, too large smears it across the canvas. Match your "
                                "camera: phone main ~70, wide ~90, ultrawide ~110-120."}),
             },
             "optional": {
                 "yaw_deg": ("FLOAT", {"default": 0.0, "min": -180.0, "max": 180.0, "step": 1.0,
-                    "tooltip": "Horizontal placement of the view center (0 = forward/center col)."}),
+                    "tooltip": "Where on the sphere the photo points. 0 is canvas centre, "
+                               "180 is the wrap seam."}),
                 "pitch_deg": ("FLOAT", {"default": 0.0, "min": -90.0, "max": 90.0, "step": 1.0,
-                    "tooltip": "Vertical placement of the view center (0 = horizon/mid row)."}),
-                "mask_feather": ("INT", {"default": 8, "min": 0, "max": 128, "step": 1,
-                    "tooltip": "Feather (px) on the inpaint_mask edge. Softens the known/hole "
-                               "boundary so an inpainting sampler blends instead of leaving a hard "
-                               "seam. 0 = hard edge."}),
+                    "tooltip": "Camera tilt. 0 for a level shot. If the horizon comes out "
+                               "wrong, this is the value to change first."}),
+                "mask_feather": ("INT", {"default": 0, "min": 0, "max": 128, "step": 1,
+                    "tooltip": "Feather (px) on the inpaint_mask edge, ramping INTO the known "
+                               "side only. Keep at 0 for models trained on hard edges; a ramp "
+                               "there is content mixed towards the fill colour."}),
                 "supersample": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5,
                     "tooltip": "Anti-alias quality. The source is heavily minified into the ERP "
                                "footprint; this area-prefilters it to footprint x this factor "
@@ -199,7 +202,7 @@ class PerspToErpWarp:
     CATEGORY = CATEGORY
 
     def build(self, image, width, height, length, h_fov_deg, yaw_deg=0.0, pitch_deg=0.0,
-              mask_feather=8, supersample=2.0, grid_spacing_deg=10, guide_opacity=0.55,
+              mask_feather=0, supersample=2.0, grid_spacing_deg=10, guide_opacity=0.55,
               fill_color="#000000"):
         W, H = int(width), int(height)
         src = image[0].permute(2, 0, 1).unsqueeze(0).float().clamp(0, 1)  # [1,3,sh,sw]
@@ -302,6 +305,10 @@ class PerspToErpWarp:
 
 class EstimateFOV:
     """Estimate horizontal FOV + pitch from image geometry (vanishing points, no EXIF).
+
+    DEPRECATED: in practice the estimator misplaces level shots into the nadir and the
+    hFOV error can be huge. Prefer typing the FOV into the warp node by hand (phone main
+    ~70, wide ~90). Kept only so old workflows still load.
 
     Wire the estimated h_fov_deg / pitch_deg into the ERP Warp node. Honest fallback: on
     a near-1-point-perspective scene (focal under-determined) it returns fallback_fov and
@@ -589,3 +596,169 @@ class UnfilledMask:
               f"{m.mean().item()*100:.1f}% of the pano masked for a fill pass")
         vis = m.unsqueeze(-1).repeat(1, 1, 3)
         return (m.unsqueeze(0), vis.unsqueeze(0), rows)
+
+
+class Krea2FullResReference:
+    """Replace the reference latents of a Krea-2-edit conditioning with full-resolution ones.
+
+    WHY THIS NODE EXISTS
+    --------------------
+    TextEncodeKrea2OstrisEdit caps references at 1 MP (REF_LATENT_MAX_PIXELS). And
+    pack_ref_latents in ai-toolkit/ComfyUI assigns the reference's RoPE positions as
+    arange(h) / arange(w) FROM ZERO. If the ref grid is smaller than the target grid,
+    the reference therefore sits in the TOP-LEFT corner instead of covering the frame:
+
+        target 2048x1024 -> target grid 128x64
+        reference gets capped to 1456x720 -> ref grid 91x45
+        => the reference covers 50% of the area, anchored top-left
+
+    Visible as the original photo stuck in the upper-left corner. At 1408x704 and
+    1440x720 it goes unnoticed because both are under 1 MP, so the cap is a no-op.
+    Anything above that falls apart.
+
+    For pixel-exact ERP outpainting the ref grid must match the target grid exactly.
+    This node encodes the canvas uncapped and sets it as reference_latents, overriding
+    whatever the encode attached.
+
+    COST: reference tokens grow quadratically. 1408x704 is 3872 tokens, 2048x1024 is
+    8192. With kv_cache on the model patch they are computed once and reused across all
+    steps, so only the extra attention keys remain.
+
+    NOTE: ModelSamplingFlux must be set to the same resolution -- Krea's mu is
+    resolution-dependent.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "vae": ("VAE",),
+                "image": ("IMAGE",),
+            },
+            "optional": {
+                "max_megapixels": ("FLOAT", {"default": 8.0, "min": 0.25, "max": 32.0,
+                                             "step": 0.25,
+                                             "tooltip": "Safety cap against running out of "
+                                                        "memory. 8 lets 2048x1024 through "
+                                                        "uncapped."}),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "run"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("Sets the Krea-2 reference at full resolution so the ref and target "
+                   "grids line up. Without it, above 1 MP the reference sits in the "
+                   "top-left corner.")
+
+    SNAP = 16   # VAE f8 * patch 2
+
+    def run(self, conditioning, vae, image, max_megapixels=8.0):
+        import node_helpers
+        import comfy.utils
+
+        s = image.movedim(-1, 1)
+        h, w = int(s.shape[2]), int(s.shape[3])
+        cap = int(float(max_megapixels) * 1024 * 1024)
+        scale = min(1.0, math.sqrt(cap / float(w * h)))
+        nw = max(int(round(w * scale / self.SNAP)) * self.SNAP, self.SNAP)
+        nh = max(int(round(h * scale / self.SNAP)) * self.SNAP, self.SNAP)
+        if (nh, nw) != (h, w):
+            s = comfy.utils.common_upscale(s, nw, nh, "area", "disabled")
+
+        latent = vae.encode(s.movedim(1, -1)[:, :, :, :3])
+        out = node_helpers.conditioning_set_values(
+            conditioning, {"reference_latents": [latent]})
+
+        gw, gh = nw // self.SNAP, nh // self.SNAP
+        note = "" if (nh, nw) == (h, w) else f"  (capped to {max_megapixels} MP!)"
+        print(f"[Mickmumpitz/Pano] Krea2FullResReference: reference {w}x{h} -> {nw}x{nh}, "
+              f"ref grid {gw}x{gh} = {gw * gh} tokens{note}")
+        return (out,)
+
+
+class PanoRollHorizontal:
+    """Roll a panorama horizontally so the wrap seam moves to the image centre.
+
+    Replaces the previous chain of two ImageCrop plus ImageStitch, on both sides of the
+    seam pass. The advantage is not the node count: the crop chain needed half the image
+    width as a NUMBER in the graph, so it had to be re-entered whenever the canvas
+    changed. Here the width comes from the image itself; there is nothing to keep in sync.
+
+    Applied twice with the same settings it returns the original (canvas widths are
+    divisible by 16, hence even).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "fraction": ("FLOAT", {"default": 0.5, "min": -1.0, "max": 1.0, "step": 0.01,
+                                       "tooltip": "Fraction of the image width. 0.5 pushes "
+                                                  "the seam exactly to the centre."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "run"
+    CATEGORY = CATEGORY
+    DESCRIPTION = "Horizontal wrap-around roll. Brings the wrap seam to the image centre and back."
+
+    def run(self, image, fraction=0.5):
+        W = int(image.shape[2])
+        shift = int(round(W * float(fraction))) % W if W else 0
+        if shift == 0:
+            return (image,)
+        return (torch.roll(image, shifts=shift, dims=2),)
+
+
+class PanoSeamMask:
+    """Mask for the seam strip in the image centre, with soft flanks.
+
+    Replaces SolidMask + SolidMask + MaskComposite + FeatherMask. The x position is
+    (width - strip width) / 2 and is computed here instead of living as a number in the
+    graph. Width and height come straight from the two size inputs; the graph needs
+    nothing else. Unlike a blur-based feather, the ramp stays INSIDE the strip, so the
+    mask never grows past the intended width.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 1408, "min": 256, "max": 8192, "step": 16}),
+                "height": ("INT", {"default": 704, "min": 128, "max": 4096, "step": 16}),
+                "seam_width": ("INT", {"default": 96, "min": 16, "max": 2048, "step": 16,
+                                       "tooltip": "Width of the strip that gets repainted."}),
+                "feather": ("INT", {"default": 24, "min": 0, "max": 512, "step": 1,
+                                    "tooltip": "Soft flank left and right, in pixels."}),
+            },
+        }
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("mask",)
+    FUNCTION = "run"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("Centred seam strip as a mask; position and flanks are computed from "
+                   "width and strip width.")
+
+    def run(self, width, height, seam_width, feather):
+        W, H = int(width), int(height)
+        s = max(min(int(seam_width), W), 1)
+        f = max(int(feather), 0)
+        x0 = (W - s) // 2
+
+        col = torch.zeros(W, dtype=torch.float32)
+        col[x0:x0 + s] = 1.0
+        if f > 0:
+            ramp = torch.linspace(0.0, 1.0, f + 2, dtype=torch.float32)[1:-1]
+            n = min(f, s // 2)
+            if n > 0:
+                col[x0:x0 + n] = ramp[:n]
+                col[x0 + s - n:x0 + s] = ramp[:n].flip(0)
+        mask = col.view(1, 1, W).expand(1, H, W).clone()
+        print(f"[Mickmumpitz/Pano] SeamMask: {W}x{H}, strip {s} at x={x0}, flank {f}")
+        return (mask,)
