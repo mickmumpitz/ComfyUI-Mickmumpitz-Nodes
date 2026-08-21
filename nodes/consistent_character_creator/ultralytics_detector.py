@@ -536,9 +536,10 @@ class UltralyticsDetectorProvider:
         return (bbox, segm)
 
 
-# Kick off the one-time default-model download on import (background, no-op if
-# the models already exist or downloads are disabled).
-_ensure_default_models(background=True)
+# NOTE: We deliberately do NOT download anything at import time. The one-time
+# default-model fetch is triggered lazily from UltralyticsDetectorProvider.load()
+# the first time the node actually runs and only if the chosen model is missing.
+# This avoids any network activity merely from ComfyUI loading the pack.
 
 
 NODE_CLASS_MAPPINGS = {

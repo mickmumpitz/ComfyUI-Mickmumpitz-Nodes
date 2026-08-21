@@ -383,7 +383,8 @@ class SeamRoll:
 
         mw = max(1, int(round(W * float(seam_width))))
         c = W // 2
-        x0 = max(0, c - mw // 2); x1 = min(W, x0 + mw)
+        x0 = max(0, c - mw // 2)
+        x1 = min(W, x0 + mw)
         m = torch.zeros((H, W), dtype=torch.float32)
         m[:, x0:x1] = 1.0
         r = int(feather)
