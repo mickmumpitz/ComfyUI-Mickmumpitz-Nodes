@@ -34,7 +34,6 @@ unchanged.
 """
 
 import os
-import shutil
 import logging
 import threading
 from collections import namedtuple
@@ -90,26 +89,23 @@ except Exception:  # pragma: no cover - folder_paths only exists inside ComfyUI
 # re-downloaded. It runs on a background thread so it never blocks ComfyUI
 # startup, and it can be disabled entirely (see _download_disabled).
 #
-# The model files themselves are public weights hosted on Hugging Face; the
-# download logic here is our own (stdlib urllib, atomic temp-file rename).
+# The model files are public weights hosted on Hugging Face and are fetched
+# with the standard ``huggingface_hub`` downloader (the same library ComfyUI
+# and most model nodes already use for weight retrieval).
 
 _DEFAULT_MODELS = [
-    ("bbox", "face_yolov8m.pt",
-     "https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8m.pt"),
-    ("bbox", "hand_yolov8s.pt",
-     "https://huggingface.co/Bingsu/adetailer/resolve/main/hand_yolov8s.pt"),
-    ("segm", "person_yolov8m-seg.pt",
-     "https://huggingface.co/Bingsu/adetailer/resolve/main/person_yolov8m-seg.pt"),
+    # (subfolder, local filename, hf repo id, filename within the repo)
+    ("bbox", "face_yolov8m.pt", "Bingsu/adetailer", "face_yolov8m.pt"),
+    ("bbox", "hand_yolov8s.pt", "Bingsu/adetailer", "hand_yolov8s.pt"),
+    ("segm", "person_yolov8m-seg.pt", "Bingsu/adetailer", "person_yolov8m-seg.pt"),
 ]
 
 _DOWNLOAD_STARTED = False
 
 
 def _download_disabled():
-    """Opt-out: an env var, or a ``skip_download_model`` marker file placed next
-    to this pack or in the custom_nodes directory."""
-    if os.environ.get("MMZ_SKIP_MODEL_DOWNLOAD"):
-        return True
+    """Opt-out: a ``skip_download_model`` marker file placed next to this pack or
+    in the custom_nodes directory disables the one-time model download."""
     here = os.path.dirname(os.path.abspath(__file__))
     # .../custom_nodes/ComfyUI-Mickmumpitz-Nodes/nodes/consistent_character_creator
     pack_root = os.path.abspath(os.path.join(here, "..", "..", ".."))
@@ -118,38 +114,6 @@ def _download_disabled():
         if os.path.exists(os.path.join(base, "skip_download_model")):
             return True
     return False
-
-
-def _download_file(url, dest):
-    """Stream ``url`` to ``dest`` via a ``.part`` temp file, then atomically
-    rename into place. Leaves no partial file at ``dest`` on failure."""
-    import time
-    import urllib.request
-
-    tmp = dest + ".part"
-    req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-Mickmumpitz-Nodes"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp, open(tmp, "wb") as f:
-            shutil.copyfileobj(resp, f)
-        # On Windows a just-written file can be briefly locked (antivirus /
-        # search indexer), making os.replace fail with WinError 32. Retry a few
-        # times before giving up — the downloaded bytes are already safe in tmp.
-        last_err = None
-        for attempt in range(6):
-            try:
-                os.replace(tmp, dest)
-                return
-            except PermissionError as e:
-                last_err = e
-                time.sleep(0.5 * (attempt + 1))
-        raise last_err
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-        raise
 
 
 def _ensure_default_models(background=True):
@@ -162,23 +126,31 @@ def _ensure_default_models(background=True):
         return
 
     targets = []
-    for sub, name, url in _DEFAULT_MODELS:
+    for sub, name, repo, filename in _DEFAULT_MODELS:
         folder = _ULTRA_BBOX if sub == "bbox" else _ULTRA_SEGM
         dest = os.path.join(folder, name)
         if not os.path.exists(dest):
-            targets.append((url, dest, folder))
+            targets.append((repo, filename, dest, folder))
     if not targets:
         return
 
     _DOWNLOAD_STARTED = True
 
     def _worker():
-        for url, dest, folder in targets:
+        try:
+            from huggingface_hub import hf_hub_download
+        except Exception as e:
+            logger.warning("[MMZ] huggingface_hub is unavailable (%s); skipping the "
+                           "default detection-model download. Place the models under "
+                           "%s manually if you need them.", e, _ULTRA_ROOT)
+            return
+        for repo, filename, dest, folder in targets:
             try:
                 os.makedirs(folder, exist_ok=True)
                 logger.info("[MMZ] Downloading detection model %s ...",
                             os.path.basename(dest))
-                _download_file(url, dest)
+                hf_hub_download(repo_id=repo, repo_type="model",
+                                filename=filename, local_dir=folder)
                 logger.info("[MMZ] Saved %s", dest)
             except Exception as e:  # network/offline/permission — non-fatal
                 logger.warning("[MMZ] Could not download %s (%s). Place the "
