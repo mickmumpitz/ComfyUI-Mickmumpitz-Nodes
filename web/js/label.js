@@ -129,6 +129,10 @@ app.registerExtension({
                 return false;
             }
 
+            // Labels have no title bar, so skip the node source badge
+            // ("frontend_only") the new frontend draws above it.
+            drawBadges() {}
+
             onShowCustomPanelInfo(panel) {
                 panel
                     .querySelector('div.property[data-property="Mode"]')
